@@ -357,4 +357,90 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
+
+    #[test]
+    fn control_panel_and_convert_tool_options_enforce_mutual_exclusion_and_persist() {
+        use crate::ui::AppUiController;
+
+        let domain = "com.tuyenmai.openkey.rust_vc_test";
+        let mut ui = AppUiController::with_domain(domain);
+        ui.load_default_config();
+
+        ui.set_free_mark(true);
+        ui.set_modern_orthography(true);
+        ui.set_check_spelling(false);
+        ui.set_quick_telex(true);
+        ui.set_restore_if_invalid_word(true);
+        ui.set_temp_off_spell_checking(true);
+        ui.set_allow_zfwj(true);
+        ui.set_fix_recommend_browser(true);
+        ui.set_use_macro(true);
+        ui.set_use_macro_in_english_mode(true);
+        ui.set_auto_caps_macro(true);
+        ui.set_send_key_step_by_step(true);
+        ui.set_perform_layout_compat(true);
+        ui.set_use_smart_switch_key(true);
+        ui.set_upper_case_first_char(true);
+        ui.set_quick_start_consonant(true);
+        ui.set_quick_end_consonant(true);
+        ui.set_temp_off_open_key(true);
+        ui.set_remember_table_code(true);
+        ui.set_other_language(true);
+        ui.set_fix_chromium_browser(true);
+        ui.set_show_icon_on_dock(true);
+        ui.set_gray_icon(false);
+        ui.set_run_on_startup(false);
+        ui.set_show_ui_on_startup(true);
+        ui.set_check_new_version_on_startup(false);
+
+        // ConvertTool casing options are mutually exclusive (matching turnOffAllOption in ConvertToolViewController.mm)
+        ui.set_convert_to_all_caps(true);
+        assert!(ui.handler.engine.convert_tool.to_all_caps);
+        ui.set_convert_to_non_caps(true);
+        assert!(!ui.handler.engine.convert_tool.to_all_caps);
+        assert!(ui.handler.engine.convert_tool.to_all_non_caps);
+        ui.set_convert_to_caps_first_letter(true);
+        assert!(!ui.handler.engine.convert_tool.to_all_non_caps);
+        assert!(ui.handler.engine.convert_tool.to_caps_first_letter);
+        ui.set_convert_to_caps_each_word(true);
+        assert!(!ui.handler.engine.convert_tool.to_caps_first_letter);
+        assert!(ui.handler.engine.convert_tool.to_caps_each_word);
+
+        ui.set_convert_from_code(0);
+        ui.set_convert_to_code(2);
+        ui.reverse_convert_codes();
+        assert_eq!(ui.handler.engine.convert_tool.from_code, 2);
+        assert_eq!(ui.handler.engine.convert_tool.to_code, 0);
+
+        let reloaded = AppUiController::load_from_domain(domain);
+        assert_eq!(reloaded.handler.engine.config.free_mark, 1);
+        assert_eq!(reloaded.handler.engine.config.use_modern_orthography, 1);
+        assert_eq!(reloaded.handler.engine.config.check_spelling, 0);
+        assert_eq!(reloaded.handler.engine.config.quick_telex, 1);
+        assert_eq!(reloaded.handler.engine.config.restore_if_wrong_spelling, 1);
+        assert_eq!(reloaded.handler.engine.config.allow_consonant_zfwj, 1);
+        assert_eq!(reloaded.handler.engine.config.use_macro_in_english_mode, 1);
+        assert_eq!(reloaded.handler.engine.config.auto_caps_macro, 1);
+        assert!(reloaded.config.send_key_step_by_step);
+        assert!(reloaded.config.perform_layout_compat);
+        assert!(reloaded.config.fix_chromium_browser);
+        assert!(reloaded.config.show_on_dock);
+        assert!(!reloaded.config.gray_icon);
+        assert!(!reloaded.config.run_on_startup);
+        assert!(reloaded.config.show_ui_on_startup);
+        assert!(reloaded.config.dont_check_update);
+        assert_eq!(reloaded.handler.engine.convert_tool.from_code, 2);
+        assert_eq!(reloaded.handler.engine.convert_tool.to_code, 0);
+        assert!(reloaded.handler.engine.convert_tool.to_caps_each_word);
+    }
+
+    #[test]
+    fn registers_objc_delegate_class_with_menu_and_window_selectors() {
+        use crate::ui::register_objc_delegate_class;
+
+        let cls_ptr = register_objc_delegate_class();
+        assert!(!cls_ptr.is_null());
+        // Calling a second time is idempotent and returns the same registered Class
+        assert_eq!(register_objc_delegate_class(), cls_ptr);
+    }
 }

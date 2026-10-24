@@ -1,7 +1,6 @@
 use std::ffi::{c_char, c_void, CString};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::ptr;
 
 use openkey_macos::config::{MacConfig, OPENKEY_BUNDLE};
 use openkey_macos::event_tap::quick_convert_pasteboard;
@@ -97,6 +96,9 @@ impl AppUiController {
     pub fn save_preferences(&mut self) {
         self.config.engine = self.handler.engine.config.clone();
         self.config.convert_tool = self.handler.engine.convert_tool.clone();
+        self.config.send_key_step_by_step = self.handler.send_key_step_by_step;
+        self.config.fix_chromium_browser = self.handler.fix_chromium_browser;
+        self.config.perform_layout_compat = self.handler.perform_layout_compat;
         self.config.macro_data = self.handler.engine.macros.to_bytes();
         self.config.smart_switch_data = self.handler.engine.smart_switch.to_bytes();
         self.config.save_to_cf_preferences(&self.domain);
@@ -213,6 +215,193 @@ impl AppUiController {
         self.save_preferences();
     }
 
+    // ViewController.m option setters
+    pub fn set_free_mark(&mut self, enabled: bool) {
+        self.handler.engine.config.free_mark = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_modern_orthography(&mut self, enabled: bool) {
+        self.handler.engine.config.use_modern_orthography = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_check_spelling(&mut self, enabled: bool) {
+        self.handler.engine.config.check_spelling = if enabled { 1 } else { 0 };
+        self.handler.engine.set_check_spelling();
+        self.save_preferences();
+    }
+
+    pub fn set_quick_telex(&mut self, enabled: bool) {
+        self.handler.engine.config.quick_telex = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_restore_if_invalid_word(&mut self, enabled: bool) {
+        self.handler.engine.config.restore_if_wrong_spelling = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_temp_off_spell_checking(&mut self, enabled: bool) {
+        self.handler.engine.config.temp_off_spelling = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_allow_zfwj(&mut self, enabled: bool) {
+        self.handler.engine.config.allow_consonant_zfwj = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_fix_recommend_browser(&mut self, enabled: bool) {
+        self.handler.engine.config.fix_recommend_browser = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_use_macro(&mut self, enabled: bool) {
+        self.handler.engine.config.use_macro = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_use_macro_in_english_mode(&mut self, enabled: bool) {
+        self.handler.engine.config.use_macro_in_english_mode = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_auto_caps_macro(&mut self, enabled: bool) {
+        self.handler.engine.config.auto_caps_macro = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_send_key_step_by_step(&mut self, enabled: bool) {
+        self.handler.send_key_step_by_step = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_perform_layout_compat(&mut self, enabled: bool) {
+        self.handler.perform_layout_compat = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_use_smart_switch_key(&mut self, enabled: bool) {
+        self.handler.engine.config.use_smart_switch_key = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_upper_case_first_char(&mut self, enabled: bool) {
+        self.handler.engine.config.upper_case_first_char = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_quick_start_consonant(&mut self, enabled: bool) {
+        self.handler.engine.config.quick_start_consonant = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_quick_end_consonant(&mut self, enabled: bool) {
+        self.handler.engine.config.quick_end_consonant = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_temp_off_open_key(&mut self, enabled: bool) {
+        self.handler.engine.config.temp_off_open_key = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_remember_table_code(&mut self, enabled: bool) {
+        self.handler.engine.config.remember_code = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_other_language(&mut self, enabled: bool) {
+        self.handler.engine.config.other_language = if enabled { 1 } else { 0 };
+        self.save_preferences();
+    }
+
+    pub fn set_fix_chromium_browser(&mut self, enabled: bool) {
+        self.handler.fix_chromium_browser = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_show_icon_on_dock(&mut self, enabled: bool) {
+        self.config.show_on_dock = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_gray_icon(&mut self, enabled: bool) {
+        self.config.gray_icon = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_run_on_startup(&mut self, enabled: bool) {
+        self.config.run_on_startup = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_show_ui_on_startup(&mut self, enabled: bool) {
+        self.config.show_ui_on_startup = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_check_new_version_on_startup(&mut self, enabled: bool) {
+        self.config.dont_check_update = !enabled;
+        self.save_preferences();
+    }
+
+    // ConvertToolViewController.mm option setters
+    pub fn turn_off_all_convert_caps_options(&mut self) {
+        self.handler.engine.convert_tool.to_all_caps = false;
+        self.handler.engine.convert_tool.to_all_non_caps = false;
+        self.handler.engine.convert_tool.to_caps_first_letter = false;
+        self.handler.engine.convert_tool.to_caps_each_word = false;
+    }
+
+    pub fn set_convert_to_all_caps(&mut self, enabled: bool) {
+        self.turn_off_all_convert_caps_options();
+        self.handler.engine.convert_tool.to_all_caps = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_convert_to_non_caps(&mut self, enabled: bool) {
+        self.turn_off_all_convert_caps_options();
+        self.handler.engine.convert_tool.to_all_non_caps = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_convert_to_caps_first_letter(&mut self, enabled: bool) {
+        self.turn_off_all_convert_caps_options();
+        self.handler.engine.convert_tool.to_caps_first_letter = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_convert_to_caps_each_word(&mut self, enabled: bool) {
+        self.turn_off_all_convert_caps_options();
+        self.handler.engine.convert_tool.to_caps_each_word = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_convert_remove_mark(&mut self, enabled: bool) {
+        self.handler.engine.convert_tool.remove_mark = enabled;
+        self.save_preferences();
+    }
+
+    pub fn set_convert_from_code(&mut self, code: u8) {
+        self.handler.engine.convert_tool.from_code = code;
+        self.save_preferences();
+    }
+
+    pub fn set_convert_to_code(&mut self, code: u8) {
+        self.handler.engine.convert_tool.to_code = code;
+        self.save_preferences();
+    }
+
+    pub fn reverse_convert_codes(&mut self) {
+        let from = self.handler.engine.convert_tool.from_code;
+        let to = self.handler.engine.convert_tool.to_code;
+        self.handler.engine.convert_tool.from_code = to;
+        self.handler.engine.convert_tool.to_code = from;
+        self.save_preferences();
+    }
+
     pub fn on_quick_convert(&self) -> bool {
         quick_convert_pasteboard(&self.handler.engine.convert_tool)
     }
@@ -263,12 +452,10 @@ pub fn create_macos_app_bundle(out_dir: &Path) -> Result<PathBuf, String> {
     fs::write(contents.join("Info.plist"), info_plist)
         .map_err(|e| format!("failed to write Info.plist: {}", e))?;
 
-    // Copy current executable into Contents/MacOS/OpenKey if available
     if let Ok(exe) = std::env::current_exe() {
         let _ = fs::copy(&exe, macos_dir.join("OpenKey"));
     }
 
-    // Copy icon resources from Sources/OpenKey/macOS/ModernKey/Resources
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let src_resources = repo_root.join("Sources/OpenKey/macOS/ModernKey/Resources");
     if src_resources.exists() {
@@ -293,6 +480,18 @@ pub fn create_macos_app_bundle(out_dir: &Path) -> Result<PathBuf, String> {
 extern "C" {
     fn objc_getClass(name: *const c_char) -> *mut c_void;
     fn sel_registerName(name: *const c_char) -> *mut c_void;
+    fn objc_allocateClassPair(
+        superclass: *mut c_void,
+        name: *const c_char,
+        extra_bytes: usize,
+    ) -> *mut c_void;
+    fn class_addMethod(
+        cls: *mut c_void,
+        name: *mut c_void,
+        imp: *const c_void,
+        types: *const c_char,
+    ) -> i8;
+    fn objc_registerClassPair(cls: *mut c_void);
     fn objc_msgSend();
 }
 
@@ -316,6 +515,106 @@ unsafe fn nsstring(s: &str) -> *mut c_void {
     f(cls("NSString"), sel("stringWithUTF8String:"), c.as_ptr())
 }
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_input_method_selected(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    ui.on_input_method_selected();
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_input_type_selected(_this: *mut c_void, _cmd: *mut c_void, sender: *mut c_void) {
+    if !sender.is_null() {
+        let get_tag: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+            std::mem::transmute(objc_msgSend as *const ());
+        let tag = get_tag(sender, sel("tag")) as i32;
+        let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+        ui.on_input_type_selected(tag);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_code_selected(_this: *mut c_void, _cmd: *mut c_void, sender: *mut c_void) {
+    if !sender.is_null() {
+        let get_tag: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+            std::mem::transmute(objc_msgSend as *const ());
+        let tag = get_tag(sender, sel("tag")) as i32;
+        let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+        ui.on_code_table_changed(tag);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_quick_convert(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    let ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    let _ = ui.on_quick_convert();
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_window_action(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    // Window presentation handler for Control Panel / Macro / Convert Tool / About
+}
+
+/// Registers the `OpenKeyRustDelegate` Objective-C class with AppKit menu & window action selectors.
+pub fn register_objc_delegate_class() -> *mut c_void {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let existing = cls("OpenKeyRustDelegate");
+        if !existing.is_null() {
+            return existing;
+        }
+        let superclass = cls("NSObject");
+        let name = CString::new("OpenKeyRustDelegate").unwrap();
+        let new_cls = objc_allocateClassPair(superclass, name.as_ptr(), 0);
+        if new_cls.is_null() {
+            return cls("OpenKeyRustDelegate");
+        }
+        let sig = CString::new("v@:@").unwrap();
+        class_addMethod(
+            new_cls,
+            sel("onInputMethodSelected:"),
+            objc_on_input_method_selected as *const c_void,
+            sig.as_ptr(),
+        );
+        class_addMethod(
+            new_cls,
+            sel("onInputTypeSelected:"),
+            objc_on_input_type_selected as *const c_void,
+            sig.as_ptr(),
+        );
+        class_addMethod(
+            new_cls,
+            sel("onCodeSelected:"),
+            objc_on_code_selected as *const c_void,
+            sig.as_ptr(),
+        );
+        class_addMethod(
+            new_cls,
+            sel("onQuickConvert:"),
+            objc_on_quick_convert as *const c_void,
+            sig.as_ptr(),
+        );
+        for window_sel in [
+            "onControlPanelSelected:",
+            "onMacroSelected:",
+            "onConvertToolSelected:",
+            "onAboutSelected:",
+        ] {
+            class_addMethod(
+                new_cls,
+                sel(window_sel),
+                objc_on_window_action as *const c_void,
+                sig.as_ptr(),
+            );
+        }
+        objc_registerClassPair(new_cls);
+        new_cls
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ptr::null_mut()
+    }
+}
+
 /// Initializes the native Cocoa `NSStatusBar` status item and menu matching `createStatusBarMenu` in `AppDelegate.m`.
 #[cfg(target_os = "macos")]
 pub unsafe fn setup_cocoa_status_bar(ui: &AppUiController) -> *mut c_void {
@@ -337,14 +636,16 @@ pub unsafe fn setup_cocoa_status_bar(ui: &AppUiController) -> *mut c_void {
         *mut c_void,
     ) -> *mut c_void = std::mem::transmute(objc_msgSend as *const ());
 
+    let delegate_cls = register_objc_delegate_class();
+    let delegate_target = msg0(msg0(delegate_cls, sel("alloc")), sel("init"));
+
     let app = msg0(cls("NSApplication"), sel("sharedApplication"));
-    let policy: isize = if ui.config.show_on_dock { 0 } else { 1 }; // 0 = Regular, 1 = Accessory
+    let policy: isize = if ui.config.show_on_dock { 0 } else { 1 };
     let set_policy: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) -> i8 =
         std::mem::transmute(objc_msgSend as *const ());
     set_policy(app, sel("setActivationPolicy:"), policy);
 
     let status_bar = msg0(cls("NSStatusBar"), sel("systemStatusBar"));
-    // NSVariableStatusItemLength = -1.0
     let status_item = msg1_f64(status_bar, sel("statusItemWithLength:"), -1.0);
     let snap = ui.menu_snapshot();
 
@@ -361,9 +662,10 @@ pub unsafe fn setup_cocoa_status_bar(ui: &AppUiController) -> *mut c_void {
         menu,
         sel("addItemWithTitle:action:keyEquivalent:"),
         nsstring("Bật Tiếng Việt"),
-        ptr::null_mut(),
+        sel("onInputMethodSelected:"),
         nsstring(""),
     );
+    msg1_ptr(item_vn, sel("setTarget:"), delegate_target);
     msg1_isize(
         item_vn,
         sel("setState:"),
@@ -384,9 +686,11 @@ pub unsafe fn setup_cocoa_status_bar(ui: &AppUiController) -> *mut c_void {
             menu,
             sel("addItemWithTitle:action:keyEquivalent:"),
             nsstring(title),
-            ptr::null_mut(),
+            sel("onCodeSelected:"),
             nsstring(""),
         );
+        msg1_ptr(item, sel("setTarget:"), delegate_target);
+        msg1_isize(item, sel("setTag:"), idx as isize);
         msg1_isize(
             item,
             sel("setState:"),
@@ -407,9 +711,11 @@ pub unsafe fn setup_cocoa_status_bar(ui: &AppUiController) -> *mut c_void {
             menu,
             sel("addItemWithTitle:action:keyEquivalent:"),
             nsstring(title),
-            ptr::null_mut(),
+            sel("onInputTypeSelected:"),
             nsstring(""),
         );
+        msg1_ptr(item, sel("setTarget:"), delegate_target);
+        msg1_isize(item, sel("setTag:"), idx as isize);
         msg1_isize(
             item,
             sel("setState:"),
@@ -420,13 +726,45 @@ pub unsafe fn setup_cocoa_status_bar(ui: &AppUiController) -> *mut c_void {
     let sep3 = msg0(cls("NSMenuItem"), sel("separatorItem"));
     msg1_ptr(menu, sel("addItem:"), sep3);
 
-    msg3_item(
+    let item_convert_tool = msg3_item(
+        menu,
+        sel("addItemWithTitle:action:keyEquivalent:"),
+        nsstring("Công cụ chuyển mã..."),
+        sel("onConvertToolSelected:"),
+        nsstring(""),
+    );
+    msg1_ptr(item_convert_tool, sel("setTarget:"), delegate_target);
+
+    let item_quick_convert = msg3_item(
         menu,
         sel("addItemWithTitle:action:keyEquivalent:"),
         nsstring(&snap.quick_convert_title),
-        ptr::null_mut(),
+        sel("onQuickConvert:"),
         nsstring(""),
     );
+    msg1_ptr(item_quick_convert, sel("setTarget:"), delegate_target);
+
+    let sep4 = msg0(cls("NSMenuItem"), sel("separatorItem"));
+    msg1_ptr(menu, sel("addItem:"), sep4);
+
+    for (title, action) in [
+        ("Bảng điều khiển...", "onControlPanelSelected:"),
+        ("Gõ tắt...", "onMacroSelected:"),
+        ("Giới thiệu", "onAboutSelected:"),
+    ] {
+        let item = msg3_item(
+            menu,
+            sel("addItemWithTitle:action:keyEquivalent:"),
+            nsstring(title),
+            sel(action),
+            nsstring(""),
+        );
+        msg1_ptr(item, sel("setTarget:"), delegate_target);
+    }
+
+    let sep5 = msg0(cls("NSMenuItem"), sel("separatorItem"));
+    msg1_ptr(menu, sel("addItem:"), sep5);
+
     msg3_item(
         menu,
         sel("addItemWithTitle:action:keyEquivalent:"),

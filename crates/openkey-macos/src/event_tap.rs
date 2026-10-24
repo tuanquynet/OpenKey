@@ -136,6 +136,14 @@ extern "C" {
 
     fn AudioServicesPlayAlertSound(in_system_sound_id: u32);
     fn AXIsProcessTrusted() -> bool;
+    fn getuid() -> u32;
+    fn proc_pidinfo(
+        pid: i32,
+        flavor: i32,
+        arg: u64,
+        buffer: *mut c_void,
+        buffersize: i32,
+    ) -> i32;
 }
 
 #[cfg(target_os = "macos")]
@@ -150,6 +158,75 @@ pub fn is_accessibility_trusted() -> bool {
     }
     #[cfg(not(target_os = "macos"))]
     {
+        false
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ProcBsdInfo {
+    pbi_flags: u32,
+    pbi_status: u32,
+    pbi_xstatus: u32,
+    pbi_pid: u32,
+    pbi_ppid: u32,
+    pbi_uid: u32,
+    pbi_gid: u32,
+    pbi_ruid: u32,
+    pbi_rgid: u32,
+    pbi_svuid: u32,
+    pbi_svgid: u32,
+    rfu_1: u32,
+    pbi_comm: [u8; 16],
+    pbi_name: [u8; 32],
+    pbi_nfiles: u32,
+    pbi_pgid: u32,
+    pbi_pjobc: u32,
+    e_tdev: u32,
+    e_tpgid: u32,
+    pbi_nice: i32,
+    pbi_start_tvsec: u64,
+    pbi_start_tvusec: u64,
+}
+
+const PROC_PIDTBSDINFO: i32 = 3;
+
+/// Returns the UID owning `pid` via `proc_pidinfo(pid, PROC_PIDTBSDINFO, ...)`.
+pub fn get_process_uid(pid: i32) -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let mut info: ProcBsdInfo = std::mem::zeroed();
+        let expected = std::mem::size_of::<ProcBsdInfo>() as i32;
+        let ret = proc_pidinfo(
+            pid,
+            PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut ProcBsdInfo) as *mut c_void,
+            expected,
+        );
+        if ret == expected {
+            Some(info.pbi_uid)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+/// Checks whether `pid` belongs to the current macOS user (`getuid()`), supporting Fast User Switching (`AppDelegate.m`).
+pub fn is_process_owned_by_current_user(pid: i32) -> bool {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let current_uid = getuid();
+        get_process_uid(pid) == Some(current_uid)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = pid;
         false
     }
 }

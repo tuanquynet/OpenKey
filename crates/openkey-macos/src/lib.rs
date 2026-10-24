@@ -244,4 +244,13 @@ mod tests {
         let _ = is_spotlight_visible();
         let _ = is_current_input_source_english();
     }
+
+    #[test]
+    fn checks_process_uid_for_multi_user_single_instance_support() {
+        let my_pid = std::process::id() as i32;
+        assert!(is_process_owned_by_current_user(my_pid));
+        assert!(get_process_uid(my_pid).is_some());
+        // PID 1 (launchd) is owned by root, not current non-root user
+        assert!(!is_process_owned_by_current_user(1));
+    }
 }
