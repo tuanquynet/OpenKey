@@ -1,9 +1,6 @@
-mod ui;
-mod app;
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match app::run_cli(&args) {
+    match openkey_app::app::run_cli(&args) {
         Ok(output) => {
             if !output.is_empty() {
                 println!("{}", output);
