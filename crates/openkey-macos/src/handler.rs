@@ -38,6 +38,7 @@ pub struct MacEventHandler {
     pub has_just_used_hotkey: bool,
     pub frontmost_app: String,
     pub spotlight_visible: bool,
+    pub current_input_source_is_english: bool,
 }
 
 impl MacEventHandler {
@@ -63,12 +64,17 @@ impl MacEventHandler {
             has_just_used_hotkey: false,
             frontmost_app: "UnknownApp".to_string(),
             spotlight_visible: false,
+            current_input_source_is_english: true,
         }
     }
 
     pub fn set_frontmost_app(&mut self, bundle_id: &str, spotlight_visible: bool) {
         self.frontmost_app = bundle_id.to_string();
         self.spotlight_visible = spotlight_visible;
+    }
+
+    pub fn set_current_input_source_is_english(&mut self, is_english: bool) {
+        self.current_input_source_is_english = is_english;
     }
 
     pub fn request_new_session(&mut self) {
@@ -504,6 +510,11 @@ impl MacEventHandler {
                 | MacEventType::RightMouseDragged
         ) {
             self.request_new_session();
+            return CallbackAction::PassThrough;
+        }
+
+        // If "turn off Vietnamese when in other language" mode is on
+        if self.engine.config.other_language != 0 && !self.current_input_source_is_english {
             return CallbackAction::PassThrough;
         }
 

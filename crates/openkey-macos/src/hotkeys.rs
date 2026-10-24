@@ -47,3 +47,52 @@ pub fn check_hot_key(hot_key_data: i32, last_flag: u64, keycode: u16, check_key_
     }
     true
 }
+
+/// Formats `convertToolHotKey` into the status menu item title matching `setQuickConvertString` in `AppDelegate.m`.
+pub fn format_quick_convert_menu_title(convert_tool_hot_key: i32) -> String {
+    let mut hot_key = String::new();
+    let mut has_add = false;
+    if (convert_tool_hot_key & 0x100) != 0 {
+        hot_key.push('⌃');
+        has_add = true;
+    }
+    if (convert_tool_hot_key & 0x200) != 0 {
+        if has_add {
+            hot_key.push_str(" + ");
+        }
+        hot_key.push('⌥');
+        has_add = true;
+    }
+    if (convert_tool_hot_key & 0x400) != 0 {
+        if has_add {
+            hot_key.push_str(" + ");
+        }
+        hot_key.push('⌘');
+        has_add = true;
+    }
+    if (convert_tool_hot_key & 0x800) != 0 {
+        if has_add {
+            hot_key.push_str(" + ");
+        }
+        hot_key.push('⇧');
+        has_add = true;
+    }
+
+    let k = ((convert_tool_hot_key as u32) >> 24) & 0xFF;
+    if k != 0xFE && k != 0 {
+        if has_add {
+            hot_key.push_str(" + ");
+        }
+        if k == (KEY_SPACE as u32) {
+            hot_key.push_str("␣ ");
+        } else {
+            hot_key.push((k as u8 as char).to_ascii_uppercase());
+        }
+    }
+
+    if has_add {
+        format!("Chuyển mã nhanh - [{}]", hot_key.to_uppercase())
+    } else {
+        "Chuyển mã nhanh".to_string()
+    }
+}

@@ -7,6 +7,7 @@ use openkey_macos::config::{MacConfig, TABLE_CODE_NAMES};
 use openkey_macos::event_tap::{is_accessibility_trusted, CoreGraphicsEventSender, EventTapContext};
 use openkey_macos::handler::MacEventHandler;
 use openkey_macos::sender::RecordingEventSender;
+use crate::ui::{create_macos_app_bundle, setup_cocoa_status_bar, AppUiController};
 
 pub fn usage() -> String {
     [
@@ -21,6 +22,7 @@ pub fn usage() -> String {
         "  openkey macro [--file <path>] list                       List macros in file",
         "  openkey macro [--file <path>] add <key> <expansion>      Add/update macro in file",
         "  openkey macro [--file <path>] delete <key>               Delete macro from file",
+        "  openkey bundle [--out-dir <dir>]                         Build macOS OpenKey.app bundle",
         "  openkey status                                           Show accessibility & table codes",
     ]
     .join("\n")
@@ -37,6 +39,7 @@ pub fn run_cli(args: &[String]) -> Result<String, String> {
         "macro" => handle_macro(&args[1..]),
         "status" => handle_status(),
         "run" => handle_run(&args[1..]),
+        "bundle" => handle_bundle(&args[1..]),
         other => Err(format!("unknown command {:?}\n\n{}", other, usage())),
     }
 }
@@ -187,24 +190,44 @@ fn handle_status() -> Result<String, String> {
     ))
 }
 
+fn handle_bundle(args: &[String]) -> Result<String, String> {
+    let mut out_dir = std::path::PathBuf::from("target/release");
+    let mut i = 0usize;
+    while i < args.len() {
+        if args[i] == "--out-dir" {
+            i += 1;
+            let val = args.get(i).ok_or("missing value for --out-dir")?;
+            out_dir = std::path::PathBuf::from(val);
+        }
+        i += 1;
+    }
+    let bundle_path = create_macos_app_bundle(&out_dir)?;
+    Ok(format!("Built macOS app bundle at {}", bundle_path.display()))
+}
+
 fn handle_run(args: &[String]) -> Result<String, String> {
-    let mut cfg = MacConfig::default();
+    let mut ui = AppUiController::load_from_domain(openkey_macos::config::OPENKEY_BUNDLE);
     let mut i = 0usize;
     while i < args.len() {
         if args[i] == "--config" {
             i += 1;
             let path = args.get(i).ok_or("missing value for --config")?;
-            cfg.load_from_file(path)
+            ui.config
+                .load_from_file(path)
                 .map_err(|e| format!("failed to load config {}: {}", path, e))?;
+            ui.handler = MacEventHandler::new(ui.config.clone());
         }
         i += 1;
     }
 
     #[cfg(target_os = "macos")]
     unsafe {
+        let _status_item = setup_cocoa_status_bar(&ui);
+        let mut sender = CoreGraphicsEventSender::new();
+        sender.convert_tool_config = ui.handler.engine.convert_tool.clone();
         let mut ctx = Box::new(EventTapContext {
-            handler: MacEventHandler::new(cfg),
-            sender: CoreGraphicsEventSender::new(),
+            handler: ui.handler,
+            sender,
             run_loop_source: std::ptr::null_mut(),
         });
         ctx.start_event_tap()?;
@@ -265,5 +288,73 @@ mod tests {
             .expect("macro list should succeed");
         assert!(list_out.contains("vn:Việt Nam"));
         let _ = std::fs::remove_file(tmp);
+    }
+
+    #[test]
+    fn menu_bar_and_control_panel_controller_syncs_state_and_preferences() {
+        use crate::ui::AppUiController;
+
+        let domain = "com.tuyenmai.openkey.rust_ui_test";
+        let mut ui = AppUiController::with_domain(domain);
+        ui.load_default_config();
+
+        let snap = ui.menu_snapshot();
+        assert!(snap.vietnamese_enabled);
+        assert_eq!(snap.status_icon_name, "Status");
+        assert_eq!(snap.status_title, "V");
+        assert_eq!(snap.selected_input_type, 0);
+        assert_eq!(snap.selected_code_table, 0);
+        assert!(snap.is_template_icon);
+
+        // Toggle input method to English
+        ui.on_input_method_selected();
+        let snap2 = ui.menu_snapshot();
+        assert!(!snap2.vietnamese_enabled);
+        assert_eq!(snap2.status_icon_name, "StatusEng");
+        assert_eq!(snap2.status_title, "E");
+
+        // Change input type to VNI (1) and code table to Unicode Compound (3)
+        ui.on_input_type_selected(1);
+        ui.on_code_table_changed(3);
+        let snap3 = ui.menu_snapshot();
+        assert_eq!(snap3.selected_input_type, 1);
+        assert_eq!(snap3.selected_code_table, 3);
+
+        // Update switch key modifiers (Control + Shift + Beep + 'z')
+        ui.set_switch_key_control(true);
+        ui.set_switch_key_option(false);
+        ui.set_switch_key_command(false);
+        ui.set_switch_key_shift(true);
+        ui.set_switch_key_beep(true);
+        ui.set_switch_key_char(6, b'z' as u16);
+
+        // Reload from CFPreferences into a fresh controller to verify persistence
+        let reloaded = AppUiController::load_from_domain(domain);
+        assert_eq!(reloaded.handler.engine.config.language, 0);
+        assert_eq!(reloaded.handler.engine.config.input_type, 1);
+        assert_eq!(reloaded.handler.engine.config.code_table, 3);
+        assert_ne!(reloaded.handler.engine.config.switch_key_status & 0x100, 0);
+        assert_eq!(reloaded.handler.engine.config.switch_key_status & 0x200, 0);
+        assert_ne!(reloaded.handler.engine.config.switch_key_status & 0x800, 0);
+        assert_ne!(reloaded.handler.engine.config.switch_key_status & 0x8000, 0);
+        assert_eq!(reloaded.handler.engine.config.switch_key_status & 0xFF, 6);
+    }
+
+    #[test]
+    fn builds_macos_openkey_app_bundle_with_plist_and_resources() {
+        let tmp_dir = std::env::temp_dir().join("openkey_rust_bundle_test");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let out_str = tmp_dir.to_string_lossy().to_string();
+
+        let res = run_cli(&s(&["bundle", "--out-dir", &out_str]))
+            .expect("bundle command should succeed");
+        assert!(res.contains("OpenKey.app"));
+
+        let app_dir = tmp_dir.join("OpenKey.app").join("Contents");
+        assert!(app_dir.join("Info.plist").exists());
+        assert!(app_dir.join("Resources").join("Status.png").exists());
+        assert!(app_dir.join("Resources").join("StatusEng.png").exists());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

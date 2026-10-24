@@ -14,6 +14,7 @@ mod tests {
     use super::hotkeys::*;
     use super::sender::*;
     use super::workaround::*;
+    use super::event_tap::*;
 
     #[test]
     fn re_enables_event_tap_when_macos_disables_by_timeout_or_user_input() {
@@ -160,5 +161,87 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert_eq!(max_chunk, 16);
+    }
+
+    #[test]
+    fn cf_preferences_roundtrips_config_and_binary_blobs() {
+        let domain = "com.tuyenmai.openkey.rust_unit_test";
+        let mut cfg = MacConfig::default();
+        cfg.engine.language = 0;
+        cfg.engine.input_type = 1; // VNI
+        cfg.engine.code_table = 3; // Unicode Compound
+        cfg.engine.quick_telex = 1;
+        cfg.engine.use_modern_orthography = 1;
+        cfg.fix_chromium_browser = true;
+        cfg.perform_layout_compat = true;
+        cfg.gray_icon = true;
+        cfg.macro_data = vec![1, 0, 2, b'v', b'n', 8, 0, b'V', b'i', b'e', b't', b' ', b'N', b'a', b'm'];
+        cfg.smart_switch_data = vec![1, 0, 16, b'c', b'o', b'm', b'.', b'a', b'p', b'p', b'l', b'e', b'.', b'S', b'a', b'f', b'a', b'r', b'i', 1];
+
+        cfg.save_to_cf_preferences(domain);
+        let mut loaded = MacConfig::default();
+        loaded.load_from_cf_preferences(domain);
+
+        assert_eq!(loaded.engine.language, 0);
+        assert_eq!(loaded.engine.input_type, 1);
+        assert_eq!(loaded.engine.code_table, 3);
+        assert_eq!(loaded.engine.quick_telex, 1);
+        assert_eq!(loaded.engine.use_modern_orthography, 1);
+        assert!(loaded.fix_chromium_browser);
+        assert!(loaded.perform_layout_compat);
+        assert!(loaded.gray_icon);
+        assert_eq!(loaded.macro_data, cfg.macro_data);
+        assert_eq!(loaded.smart_switch_data, cfg.smart_switch_data);
+    }
+
+    #[test]
+    fn formats_quick_convert_menu_title_matching_app_delegate() {
+        assert_eq!(
+            format_quick_convert_menu_title(EMPTY_HOTKEY),
+            "Chuyển mã nhanh"
+        );
+        // Control (0x100) + Shift (0x800) + 'c' in top byte ((b'c' as i32) << 24) | KEY_C
+        let hk = 0x100 | 0x800 | ((b'c' as i32) << 24) | (KEY_C as i32);
+        assert_eq!(
+            format_quick_convert_menu_title(hk),
+            "Chuyển mã nhanh - [⌃ + ⇧ + C]"
+        );
+        // Command (0x400) + Space (KEY_SPACE = 49 in top byte)
+        let hk_space = 0x400 | ((KEY_SPACE as i32) << 24) | (KEY_SPACE as i32);
+        assert_eq!(
+            format_quick_convert_menu_title(hk_space),
+            "Chuyển mã nhanh - [⌘ + ␣ ]"
+        );
+    }
+
+    #[test]
+    fn skips_vietnamese_conversion_when_other_language_input_source_is_active() {
+        let mut cfg = MacConfig::default();
+        cfg.engine.other_language = 1;
+        let mut handler = MacEventHandler::new(cfg);
+        handler.set_current_input_source_is_english(false);
+
+        let mut sender = RecordingEventSender::default();
+        sender.simulate_key_sequence(&mut handler, "tieengs");
+        // Because current input source is non-English (e.g., Japanese/Chinese IME), OpenKey passes through raw keys
+        assert_eq!(sender.rendered_text(), "tieengs");
+
+        // When input source is English, OpenKey converts normally
+        let mut sender_en = RecordingEventSender::default();
+        handler.set_current_input_source_is_english(true);
+        sender_en.simulate_key_sequence(&mut handler, "tieengs");
+        assert_eq!(sender_en.rendered_text(), "tiếng");
+    }
+
+    #[test]
+    fn converts_layout_compat_key_strings_and_queries_macos_window_and_tis_state() {
+        assert_eq!(convert_key_string_to_key_code("q", 99), KEY_Q);
+        assert_eq!(convert_key_string_to_key_code("A", 99), KEY_A);
+        assert_eq!(convert_key_string_to_key_code("{", 99), KEY_LEFT_BRACKET);
+        assert_eq!(convert_key_string_to_key_code("unknown", 99), 99);
+
+        // Smoke test live macOS queries (do not panic)
+        let _ = is_spotlight_visible();
+        let _ = is_current_input_source_english();
     }
 }

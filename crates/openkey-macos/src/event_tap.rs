@@ -1,8 +1,12 @@
 use std::ffi::c_void;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::ptr;
 
+use openkey_engine::convert_tool::{convert_util, ConvertToolConfig};
 use openkey_engine::types::KEY_DELETE;
 
+use crate::config::convert_key_string_to_key_code;
 use crate::handler::{CallbackAction, MacEventHandler, MacEventType};
 use crate::hotkeys::{CG_FLAG_NON_COALESCED, CG_FLAG_SHIFT};
 use crate::sender::EventSender;
@@ -26,7 +30,13 @@ pub const K_CG_KEYBOARD_EVENT_KEYCODE: u32 = 9;
 pub const K_CG_EVENT_SOURCE_STATE_ID: u32 = 45;
 pub const K_CG_EVENT_SOURCE_STATE_PRIVATE: i32 = -1;
 
+pub const K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY: u32 = 1 << 0;
+pub const K_CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS: u32 = 1 << 4;
+pub const K_CG_NULL_WINDOW_ID: u32 = 0;
+
 pub type CFTypeRef = *const c_void;
+pub type CFArrayRef = *const c_void;
+pub type CFDictionaryRef = *const c_void;
 pub type CFMachPortRef = *mut c_void;
 pub type CFRunLoopRef = *mut c_void;
 pub type CFRunLoopSourceRef = *mut c_void;
@@ -35,6 +45,7 @@ pub type CGEventRef = *mut c_void;
 pub type CGEventTapProxy = *mut c_void;
 pub type CGEventSourceRef = *mut c_void;
 pub type CGEventMask = u64;
+pub type TISInputSourceRef = *mut c_void;
 
 pub type CGEventTapCallBack = unsafe extern "C" fn(
     proxy: CGEventTapProxy,
@@ -47,10 +58,31 @@ pub type CGEventTapCallBack = unsafe extern "C" fn(
 #[link(name = "CoreFoundation", kind = "framework")]
 #[link(name = "CoreGraphics", kind = "framework")]
 #[link(name = "ApplicationServices", kind = "framework")]
+#[link(name = "Carbon", kind = "framework")]
+#[link(name = "AudioToolbox", kind = "framework")]
 extern "C" {
     static kCFRunLoopCommonModes: CFStringRef;
+    static kCGWindowOwnerName: CFStringRef;
+    static kTISPropertyInputSourceLanguages: CFStringRef;
 
     fn CFRelease(cf: CFTypeRef);
+    fn CFArrayGetCount(the_array: CFArrayRef) -> isize;
+    fn CFArrayGetValueAtIndex(the_array: CFArrayRef, idx: isize) -> *const c_void;
+    fn CFDictionaryGetValue(the_dict: CFDictionaryRef, key: *const c_void) -> *const c_void;
+    fn CFStringCreateWithBytes(
+        alloc: *const c_void,
+        bytes: *const u8,
+        num_bytes: isize,
+        encoding: u32,
+        is_external_representation: u8,
+    ) -> CFStringRef;
+    fn CFStringCompare(
+        the_string1: CFStringRef,
+        the_string2: CFStringRef,
+        compare_options: usize,
+    ) -> isize;
+    fn CFStringHasPrefix(the_string: CFStringRef, prefix: CFStringRef) -> u8;
+
     fn CFMachPortInvalidate(port: CFMachPortRef);
     fn CFMachPortCreateRunLoopSource(
         allocator: CFTypeRef,
@@ -61,6 +93,8 @@ extern "C" {
     fn CFRunLoopAddSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
     fn CFRunLoopRemoveSource(rl: CFRunLoopRef, source: CFRunLoopSourceRef, mode: CFStringRef);
     fn CFRunLoopRun();
+
+    fn CGWindowListCopyWindowInfo(option: u32, relative_to_window: u32) -> CFArrayRef;
 
     fn CGEventSourceCreate(state_id: i32) -> CGEventSourceRef;
     fn CGEventSourceGetSourceStateID(source: CGEventSourceRef) -> i32;
@@ -73,6 +107,12 @@ extern "C" {
         event: CGEventRef,
         string_length: usize,
         unicode_string: *const u16,
+    );
+    fn CGEventKeyboardGetUnicodeString(
+        event: CGEventRef,
+        max_string_length: usize,
+        actual_string_length: *mut usize,
+        unicode_string: *mut u16,
     );
     fn CGEventGetFlags(event: CGEventRef) -> u64;
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
@@ -88,8 +128,20 @@ extern "C" {
     ) -> CFMachPortRef;
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
 
+    fn TISCopyCurrentKeyboardInputSource() -> TISInputSourceRef;
+    fn TISGetInputSourceProperty(
+        input_source: TISInputSourceRef,
+        property_key: CFStringRef,
+    ) -> *const c_void;
+
+    fn AudioServicesPlayAlertSound(in_system_sound_id: u32);
     fn AXIsProcessTrusted() -> bool;
 }
+
+#[cfg(target_os = "macos")]
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+#[cfg(target_os = "macos")]
+const K_SYSTEM_SOUND_ID_USER_PREFERRED_ALERT: u32 = 0x0000_1000;
 
 pub fn is_accessibility_trusted() -> bool {
     #[cfg(target_os = "macos")]
@@ -100,6 +152,133 @@ pub fn is_accessibility_trusted() -> bool {
     {
         false
     }
+}
+
+/// Checks whether the macOS Spotlight window is currently visible on screen, matching `isSpotlightVisible()` in `OpenKey.mm`.
+pub fn is_spotlight_visible() -> bool {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let windows = CGWindowListCopyWindowInfo(
+            K_CG_WINDOW_LIST_OPTION_ON_SCREEN_ONLY | K_CG_WINDOW_LIST_EXCLUDE_DESKTOP_ELEMENTS,
+            K_CG_NULL_WINDOW_ID,
+        );
+        if windows.is_null() {
+            return false;
+        }
+        let target = CFStringCreateWithBytes(
+            ptr::null(),
+            b"Spotlight".as_ptr(),
+            9,
+            K_CF_STRING_ENCODING_UTF8,
+            0,
+        );
+        let count = CFArrayGetCount(windows);
+        let mut found = false;
+        for i in 0..count {
+            let dict = CFArrayGetValueAtIndex(windows, i);
+            if !dict.is_null() {
+                let owner = CFDictionaryGetValue(dict, kCGWindowOwnerName);
+                if !owner.is_null() && CFStringCompare(owner, target, 0) == 0 {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        CFRelease(target);
+        CFRelease(windows);
+        found
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Checks whether the current macOS keyboard input source primary language is English (`"en"`), matching `vOtherLanguage` check in `OpenKey.mm`.
+pub fn is_current_input_source_english() -> bool {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let isource = TISCopyCurrentKeyboardInputSource();
+        if isource.is_null() {
+            return true;
+        }
+        let languages = TISGetInputSourceProperty(isource, kTISPropertyInputSourceLanguages);
+        let mut is_en = true;
+        if !languages.is_null() && CFArrayGetCount(languages) > 0 {
+            let lang_ref = CFArrayGetValueAtIndex(languages, 0);
+            if !lang_ref.is_null() {
+                let prefix = CFStringCreateWithBytes(
+                    ptr::null(),
+                    b"en".as_ptr(),
+                    2,
+                    K_CF_STRING_ENCODING_UTF8,
+                    0,
+                );
+                is_en = CFStringHasPrefix(lang_ref, prefix) != 0;
+                CFRelease(prefix);
+            }
+        }
+        CFRelease(isource);
+        is_en
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+/// Converts a `CGEventRef` key event to its layout-compatible virtual keycode when `vPerformLayoutCompat` is enabled.
+pub fn convert_cg_event_to_layout_compat_keycode(event: CGEventRef, fallback: u16) -> u16 {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        if event.is_null() {
+            return fallback;
+        }
+        let mut actual_len: usize = 0;
+        let mut buf: [u16; 4] = [0; 4];
+        CGEventKeyboardGetUnicodeString(event, buf.len(), &mut actual_len, buf.as_mut_ptr());
+        if actual_len == 0 {
+            return fallback;
+        }
+        let s = String::from_utf16_lossy(&buf[..actual_len]);
+        convert_key_string_to_key_code(&s, fallback)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = event;
+        fallback
+    }
+}
+
+pub fn play_system_beep() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        AudioServicesPlayAlertSound(K_SYSTEM_SOUND_ID_USER_PREFERRED_ALERT);
+    }
+}
+
+/// Converts text on the macOS general pasteboard using `convert_util`, matching `[OpenKeyManager quickConvert]`.
+pub fn quick_convert_pasteboard(config: &ConvertToolConfig) -> bool {
+    let Ok(out) = Command::new("pbpaste").output() else {
+        return false;
+    };
+    if !out.status.success() || out.stdout.is_empty() {
+        return false;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout);
+    if raw.is_empty() {
+        return false;
+    }
+    let converted = convert_util(&raw, config);
+    let Ok(mut child) = Command::new("pbcopy").stdin(Stdio::piped()).spawn() else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        if stdin.write_all(converted.as_bytes()).is_err() {
+            return false;
+        }
+    }
+    child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
 pub fn map_cg_event_type(raw_type: u32) -> MacEventType {
@@ -123,6 +302,7 @@ pub struct CoreGraphicsEventSender {
     pub event_source: CGEventSourceRef,
     pub backspace_down: CGEventRef,
     pub backspace_up: CGEventRef,
+    pub convert_tool_config: ConvertToolConfig,
 }
 
 impl CoreGraphicsEventSender {
@@ -137,6 +317,7 @@ impl CoreGraphicsEventSender {
             event_source,
             backspace_down,
             backspace_up,
+            convert_tool_config: ConvertToolConfig::default(),
         }
     }
 }
@@ -210,8 +391,14 @@ impl EventSender for CoreGraphicsEventSender {
         }
     }
 
-    fn beep(&mut self) {}
-    fn on_quick_convert(&mut self) {}
+    fn beep(&mut self) {
+        play_system_beep();
+    }
+
+    fn on_quick_convert(&mut self) {
+        let _ = quick_convert_pasteboard(&self.convert_tool_config);
+    }
+
     fn on_input_method_changed(&mut self, _language: i32, _will_notify: bool) {}
     fn on_code_table_changed(&mut self, _code_table: i32) {}
 }
@@ -255,11 +442,21 @@ unsafe extern "C" fn openkey_cg_event_callback(
     } else {
         0
     };
-    let keycode = if !event.is_null() {
+    let mut keycode = if !event.is_null() {
         CGEventGetIntegerValueField(event, K_CG_KEYBOARD_EVENT_KEYCODE) as u16
     } else {
         0
     };
+
+    if ev_type == MacEventType::KeyDown {
+        if ctx.handler.perform_layout_compat {
+            keycode = convert_cg_event_to_layout_compat_keycode(event, keycode);
+        }
+        ctx.handler.spotlight_visible = is_spotlight_visible();
+        if ctx.handler.engine.config.other_language != 0 {
+            ctx.handler.current_input_source_is_english = is_current_input_source_english();
+        }
+    }
 
     match ctx
         .handler

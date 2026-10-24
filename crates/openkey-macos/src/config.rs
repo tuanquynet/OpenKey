@@ -1,5 +1,7 @@
+use std::ffi::c_void;
 use std::fs;
 use std::path::Path;
+use std::ptr;
 
 use openkey_engine::convert_tool::ConvertToolConfig;
 use openkey_engine::types::*;
@@ -26,6 +28,8 @@ pub struct MacConfig {
     pub run_on_startup: bool,
     pub gray_icon: bool,
     pub show_on_dock: bool,
+    pub show_ui_on_startup: bool,
+    pub dont_check_update: bool,
     pub macro_data: Vec<u8>,
     pub smart_switch_data: Vec<u8>,
 }
@@ -43,13 +47,428 @@ impl Default for MacConfig {
             run_on_startup: false,
             gray_icon: false,
             show_on_dock: false,
+            show_ui_on_startup: false,
+            dont_check_update: false,
             macro_data: Vec::new(),
             smart_switch_data: Vec::new(),
         }
     }
 }
 
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    fn CFRelease(cf: *const c_void);
+    fn CFStringCreateWithBytes(
+        alloc: *const c_void,
+        bytes: *const u8,
+        num_bytes: isize,
+        encoding: u32,
+        is_external_representation: u8,
+    ) -> *const c_void;
+    fn CFNumberCreate(
+        allocator: *const c_void,
+        the_type: isize,
+        value_ptr: *const c_void,
+    ) -> *const c_void;
+    fn CFNumberGetValue(
+        number: *const c_void,
+        the_type: isize,
+        value_ptr: *mut c_void,
+    ) -> u8;
+    fn CFDataCreate(
+        allocator: *const c_void,
+        bytes: *const u8,
+        length: isize,
+    ) -> *const c_void;
+    fn CFDataGetLength(the_data: *const c_void) -> isize;
+    fn CFDataGetBytePtr(the_data: *const c_void) -> *const u8;
+    fn CFPreferencesSetAppValue(
+        key: *const c_void,
+        value: *const c_void,
+        application_id: *const c_void,
+    );
+    fn CFPreferencesCopyAppValue(
+        key: *const c_void,
+        application_id: *const c_void,
+    ) -> *const c_void;
+    fn CFPreferencesAppSynchronize(application_id: *const c_void) -> u8;
+}
+
+#[cfg(target_os = "macos")]
+const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
+#[cfg(target_os = "macos")]
+const K_CF_NUMBER_SINT32_TYPE: isize = 3;
+
+#[cfg(target_os = "macos")]
+unsafe fn cf_string(s: &str) -> *const c_void {
+    CFStringCreateWithBytes(
+        ptr::null(),
+        s.as_ptr(),
+        s.len() as isize,
+        K_CF_STRING_ENCODING_UTF8,
+        0,
+    )
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn cf_pref_set_i32(domain: *const c_void, key: &str, val: i32) {
+    let k = cf_string(key);
+    let num = CFNumberCreate(
+        ptr::null(),
+        K_CF_NUMBER_SINT32_TYPE,
+        (&val as *const i32) as *const c_void,
+    );
+    CFPreferencesSetAppValue(k, num, domain);
+    CFRelease(num);
+    CFRelease(k);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn cf_pref_get_i32(domain: *const c_void, key: &str) -> Option<i32> {
+    let k = cf_string(key);
+    let val_ref = CFPreferencesCopyAppValue(k, domain);
+    CFRelease(k);
+    if val_ref.is_null() {
+        return None;
+    }
+    let mut out: i32 = 0;
+    let ok = CFNumberGetValue(
+        val_ref,
+        K_CF_NUMBER_SINT32_TYPE,
+        (&mut out as *mut i32) as *mut c_void,
+    );
+    CFRelease(val_ref);
+    if ok != 0 {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn cf_pref_set_bytes(domain: *const c_void, key: &str, bytes: &[u8]) {
+    let k = cf_string(key);
+    let data = CFDataCreate(ptr::null(), bytes.as_ptr(), bytes.len() as isize);
+    CFPreferencesSetAppValue(k, data, domain);
+    CFRelease(data);
+    CFRelease(k);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn cf_pref_get_bytes(domain: *const c_void, key: &str) -> Option<Vec<u8>> {
+    let k = cf_string(key);
+    let val_ref = CFPreferencesCopyAppValue(k, domain);
+    CFRelease(k);
+    if val_ref.is_null() {
+        return None;
+    }
+    let len = CFDataGetLength(val_ref);
+    let ptr = CFDataGetBytePtr(val_ref);
+    let out = if len > 0 && !ptr.is_null() {
+        std::slice::from_raw_parts(ptr, len as usize).to_vec()
+    } else {
+        Vec::new()
+    };
+    CFRelease(val_ref);
+    Some(out)
+}
+
 impl MacConfig {
+    pub fn save_to_cf_preferences(&self, bundle_domain: &str) {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let domain = cf_string(bundle_domain);
+            cf_pref_set_i32(domain, "InputMethod", self.engine.language);
+            cf_pref_set_i32(domain, "InputType", self.engine.input_type);
+            cf_pref_set_i32(domain, "FreeMark", self.engine.free_mark);
+            cf_pref_set_i32(domain, "CodeTable", self.engine.code_table);
+            cf_pref_set_i32(domain, "SwitchKeyStatus", self.engine.switch_key_status);
+            cf_pref_set_i32(domain, "Spelling", self.engine.check_spelling);
+            cf_pref_set_i32(domain, "ModernOrthography", self.engine.use_modern_orthography);
+            cf_pref_set_i32(domain, "QuickTelex", self.engine.quick_telex);
+            cf_pref_set_i32(
+                domain,
+                "RestoreIfInvalidWord",
+                self.engine.restore_if_wrong_spelling,
+            );
+            cf_pref_set_i32(
+                domain,
+                "FixRecommendBrowser",
+                self.engine.fix_recommend_browser,
+            );
+            cf_pref_set_i32(domain, "UseMacro", self.engine.use_macro);
+            cf_pref_set_i32(
+                domain,
+                "UseMacroInEnglishMode",
+                self.engine.use_macro_in_english_mode,
+            );
+            cf_pref_set_i32(domain, "vAutoCapsMacro", self.engine.auto_caps_macro);
+            cf_pref_set_i32(
+                domain,
+                "SendKeyStepByStep",
+                if self.send_key_step_by_step { 1 } else { 0 },
+            );
+            cf_pref_set_i32(domain, "UseSmartSwitchKey", self.engine.use_smart_switch_key);
+            cf_pref_set_i32(
+                domain,
+                "UpperCaseFirstChar",
+                self.engine.upper_case_first_char,
+            );
+            cf_pref_set_i32(domain, "vTempOffSpelling", self.engine.temp_off_spelling);
+            cf_pref_set_i32(
+                domain,
+                "vAllowConsonantZFWJ",
+                self.engine.allow_consonant_zfwj,
+            );
+            cf_pref_set_i32(
+                domain,
+                "vQuickStartConsonant",
+                self.engine.quick_start_consonant,
+            );
+            cf_pref_set_i32(
+                domain,
+                "vQuickEndConsonant",
+                self.engine.quick_end_consonant,
+            );
+            cf_pref_set_i32(domain, "vRememberCode", self.engine.remember_code);
+            cf_pref_set_i32(domain, "vOtherLanguage", self.engine.other_language);
+            cf_pref_set_i32(domain, "vTempOffOpenKey", self.engine.temp_off_open_key);
+            cf_pref_set_i32(
+                domain,
+                "vFixChromiumBrowser",
+                if self.fix_chromium_browser { 1 } else { 0 },
+            );
+            cf_pref_set_i32(
+                domain,
+                "vPerformLayoutCompat",
+                if self.perform_layout_compat { 1 } else { 0 },
+            );
+            cf_pref_set_i32(
+                domain,
+                "RunOnStartup",
+                if self.run_on_startup { 1 } else { 0 },
+            );
+            cf_pref_set_i32(domain, "GrayIcon", if self.gray_icon { 1 } else { 0 });
+            cf_pref_set_i32(
+                domain,
+                "vShowIconOnDock",
+                if self.show_on_dock { 1 } else { 0 },
+            );
+            cf_pref_set_i32(
+                domain,
+                "ShowUIOnStartup",
+                if self.show_ui_on_startup { 1 } else { 0 },
+            );
+            cf_pref_set_i32(
+                domain,
+                "DontCheckUpdate",
+                if self.dont_check_update { 1 } else { 0 },
+            );
+
+            // ConvertTool keys
+            cf_pref_set_i32(
+                domain,
+                "convertToolDontAlertWhenCompleted",
+                if self.convert_tool.dont_alert_when_completed {
+                    0
+                } else {
+                    1
+                },
+            );
+            cf_pref_set_i32(
+                domain,
+                "convertToolToAllCaps",
+                if self.convert_tool.to_all_caps { 1 } else { 0 },
+            );
+            cf_pref_set_i32(
+                domain,
+                "convertToolToAllNonCaps",
+                if self.convert_tool.to_all_non_caps {
+                    1
+                } else {
+                    0
+                },
+            );
+            cf_pref_set_i32(
+                domain,
+                "convertToolToCapsFirstLetter",
+                if self.convert_tool.to_caps_first_letter {
+                    1
+                } else {
+                    0
+                },
+            );
+            cf_pref_set_i32(
+                domain,
+                "convertToolToCapsEachWord",
+                if self.convert_tool.to_caps_each_word {
+                    1
+                } else {
+                    0
+                },
+            );
+            cf_pref_set_i32(
+                domain,
+                "convertToolRemoveMark",
+                if self.convert_tool.remove_mark { 1 } else { 0 },
+            );
+            cf_pref_set_i32(
+                domain,
+                "convertToolFromCode",
+                self.convert_tool.from_code as i32,
+            );
+            cf_pref_set_i32(
+                domain,
+                "convertToolToCode",
+                self.convert_tool.to_code as i32,
+            );
+            cf_pref_set_i32(domain, "convertToolHotKey", self.convert_tool.hot_key);
+
+            cf_pref_set_bytes(domain, "macroData", &self.macro_data);
+            cf_pref_set_bytes(domain, "smartSwitchKey", &self.smart_switch_data);
+
+            CFPreferencesAppSynchronize(domain);
+            CFRelease(domain);
+        }
+    }
+
+    pub fn load_from_cf_preferences(&mut self, bundle_domain: &str) {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let domain = cf_string(bundle_domain);
+            if let Some(v) = cf_pref_get_i32(domain, "InputMethod") {
+                self.engine.language = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "InputType") {
+                self.engine.input_type = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "FreeMark") {
+                self.engine.free_mark = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "CodeTable") {
+                self.engine.code_table = v.max(0);
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "SwitchKeyStatus") {
+                if v != 0 {
+                    self.engine.switch_key_status = v;
+                }
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "Spelling") {
+                self.engine.check_spelling = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "ModernOrthography") {
+                self.engine.use_modern_orthography = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "QuickTelex") {
+                self.engine.quick_telex = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "RestoreIfInvalidWord") {
+                self.engine.restore_if_wrong_spelling = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "FixRecommendBrowser") {
+                self.engine.fix_recommend_browser = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "UseMacro") {
+                self.engine.use_macro = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "UseMacroInEnglishMode") {
+                self.engine.use_macro_in_english_mode = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "vAutoCapsMacro") {
+                self.engine.auto_caps_macro = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "SendKeyStepByStep") {
+                self.send_key_step_by_step = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "UseSmartSwitchKey") {
+                self.engine.use_smart_switch_key = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "UpperCaseFirstChar") {
+                self.engine.upper_case_first_char = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "vTempOffSpelling") {
+                self.engine.temp_off_spelling = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "vAllowConsonantZFWJ") {
+                self.engine.allow_consonant_zfwj = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "vQuickStartConsonant") {
+                self.engine.quick_start_consonant = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "vQuickEndConsonant") {
+                self.engine.quick_end_consonant = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "vRememberCode") {
+                self.engine.remember_code = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "vOtherLanguage") {
+                self.engine.other_language = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "vTempOffOpenKey") {
+                self.engine.temp_off_open_key = v;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "vFixChromiumBrowser") {
+                self.fix_chromium_browser = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "vPerformLayoutCompat") {
+                self.perform_layout_compat = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "RunOnStartup") {
+                self.run_on_startup = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "GrayIcon") {
+                self.gray_icon = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "vShowIconOnDock") {
+                self.show_on_dock = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "ShowUIOnStartup") {
+                self.show_ui_on_startup = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "DontCheckUpdate") {
+                self.dont_check_update = v != 0;
+            }
+
+            if let Some(v) = cf_pref_get_i32(domain, "convertToolDontAlertWhenCompleted") {
+                self.convert_tool.dont_alert_when_completed = v == 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "convertToolToAllCaps") {
+                self.convert_tool.to_all_caps = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "convertToolToAllNonCaps") {
+                self.convert_tool.to_all_non_caps = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "convertToolToCapsFirstLetter") {
+                self.convert_tool.to_caps_first_letter = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "convertToolToCapsEachWord") {
+                self.convert_tool.to_caps_each_word = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "convertToolRemoveMark") {
+                self.convert_tool.remove_mark = v != 0;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "convertToolFromCode") {
+                self.convert_tool.from_code = v.max(0) as u8;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "convertToolToCode") {
+                self.convert_tool.to_code = v.max(0) as u8;
+            }
+            if let Some(v) = cf_pref_get_i32(domain, "convertToolHotKey") {
+                self.convert_tool.hot_key = if v == 0 { EMPTY_HOTKEY } else { v };
+            }
+
+            if let Some(bytes) = cf_pref_get_bytes(domain, "macroData") {
+                self.macro_data = bytes;
+            }
+            if let Some(bytes) = cf_pref_get_bytes(domain, "smartSwitchKey") {
+                self.smart_switch_data = bytes;
+            }
+
+            CFRelease(domain);
+        }
+    }
+
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> std::io::Result<()> {
         let content = format!(
             "vLanguage={}\n\
