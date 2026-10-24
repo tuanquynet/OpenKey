@@ -1,0 +1,13 @@
+[package]
+name = "openkey-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "openkey"
+path = "src/main.rs"
+
+[dependencies]
+openkey-engine = { path = "../openkey-engine" }
+openkey-macos = { path = "../openkey-macos" }

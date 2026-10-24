@@ -1,0 +1,8 @@
+[package]
+name = "openkey-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openkey-engine = { path = "../openkey-engine" }
