@@ -549,9 +549,120 @@ unsafe extern "C" fn objc_on_quick_convert(_this: *mut c_void, _cmd: *mut c_void
     let _ = ui.on_quick_convert();
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NSPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NSSize {
+    pub width: f64,
+    pub height: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NSRect {
+    pub origin: NSPoint,
+    pub size: NSSize,
+}
+
+impl NSRect {
+    pub const fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
+        Self {
+            origin: NSPoint { x, y },
+            size: NSSize { width, height },
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
-unsafe extern "C" fn objc_on_window_action(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
-    // Window presentation handler for Control Panel / Macro / Convert Tool / About
+unsafe extern "C" fn objc_on_checkbox_toggled(_this: *mut c_void, _cmd: *mut c_void, sender: *mut c_void) {
+    if sender.is_null() {
+        return;
+    }
+    let get_isize: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+        std::mem::transmute(objc_msgSend as *const ());
+    let tag = get_isize(sender, sel("tag"));
+    let state = get_isize(sender, sel("state")) != 0;
+    let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    match tag {
+        1 => ui.set_modern_orthography(state),
+        2 => ui.set_check_spelling(state),
+        3 => ui.set_restore_if_invalid_word(state),
+        4 => ui.set_quick_telex(state),
+        5 => ui.set_fix_recommend_browser(state),
+        6 => ui.set_use_macro(state),
+        7 => ui.set_use_macro_in_english_mode(state),
+        8 => ui.set_auto_caps_macro(state),
+        9 => ui.set_use_smart_switch_key(state),
+        10 => ui.set_upper_case_first_char(state),
+        11 => ui.set_allow_zfwj(state),
+        12 => ui.set_quick_start_consonant(state),
+        13 => ui.set_quick_end_consonant(state),
+        14 => ui.set_remember_table_code(state),
+        15 => ui.set_other_language(state),
+        16 => ui.set_temp_off_spelling(state),
+        17 => ui.set_temp_off_open_key(state),
+        18 => ui.set_gray_icon(state),
+        19 => ui.set_run_on_startup(state),
+        20 => ui.set_convert_remove_mark(state),
+        21 => ui.set_convert_to_all_caps(state),
+        22 => ui.set_convert_to_non_caps(state),
+        23 => ui.set_convert_to_caps_first_letter(state),
+        24 => ui.set_convert_to_caps_each_word(state),
+        _ => {}
+    }
+}
+
+impl AppUiController {
+    pub fn set_temp_off_spelling(&mut self, enabled: bool) {
+        self.set_temp_off_spell_checking(enabled);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn show_window(win: *mut c_void) {
+    if win.is_null() {
+        return;
+    }
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_bool: unsafe extern "C" fn(*mut c_void, *mut c_void, i8) =
+        std::mem::transmute(objc_msgSend as *const ());
+    msg0(win, sel("center"));
+    msg1_ptr(win, sel("makeKeyAndOrderFront:"), std::ptr::null_mut());
+    let app = msg0(cls("NSApplication"), sel("sharedApplication"));
+    msg1_bool(app, sel("activateIgnoringOtherApps:"), 1);
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_control_panel_selected(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    let ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    show_window(build_control_panel_window(&ui));
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_macro_selected(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    let ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    show_window(build_macro_window(&ui));
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_convert_tool_selected(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    let ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    show_window(build_convert_tool_window(&ui));
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_about_selected(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    let ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    show_window(build_about_window(&ui));
 }
 
 /// Registers the `OpenKeyRustDelegate` Objective-C class with AppKit menu & window action selectors.
@@ -593,25 +704,298 @@ pub fn register_objc_delegate_class() -> *mut c_void {
             objc_on_quick_convert as *const c_void,
             sig.as_ptr(),
         );
-        for window_sel in [
-            "onControlPanelSelected:",
-            "onMacroSelected:",
-            "onConvertToolSelected:",
-            "onAboutSelected:",
-        ] {
-            class_addMethod(
-                new_cls,
-                sel(window_sel),
-                objc_on_window_action as *const c_void,
-                sig.as_ptr(),
-            );
-        }
+        class_addMethod(
+            new_cls,
+            sel("onCheckboxToggled:"),
+            objc_on_checkbox_toggled as *const c_void,
+            sig.as_ptr(),
+        );
+        class_addMethod(
+            new_cls,
+            sel("onControlPanelSelected:"),
+            objc_on_control_panel_selected as *const c_void,
+            sig.as_ptr(),
+        );
+        class_addMethod(
+            new_cls,
+            sel("onMacroSelected:"),
+            objc_on_macro_selected as *const c_void,
+            sig.as_ptr(),
+        );
+        class_addMethod(
+            new_cls,
+            sel("onConvertToolSelected:"),
+            objc_on_convert_tool_selected as *const c_void,
+            sig.as_ptr(),
+        );
+        class_addMethod(
+            new_cls,
+            sel("onAboutSelected:"),
+            objc_on_about_selected as *const c_void,
+            sig.as_ptr(),
+        );
         objc_registerClassPair(new_cls);
         new_cls
     }
     #[cfg(not(target_os = "macos"))]
     {
-        ptr::null_mut()
+        std::ptr::null_mut()
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn create_base_window(title: &str, width: f64, height: f64) -> (*mut c_void, *mut c_void, *mut c_void) {
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_bool: unsafe extern "C" fn(*mut c_void, *mut c_void, i8) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let init_win: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect, usize, usize, i8) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let _app = msg0(cls("NSApplication"), sel("sharedApplication"));
+    let delegate_cls = register_objc_delegate_class();
+    let delegate = msg0(msg0(delegate_cls, sel("alloc")), sel("init"));
+
+    let win_alloc = msg0(cls("NSWindow"), sel("alloc"));
+    let style_mask: usize = (1 << 0) | (1 << 1); // Titled | Closable
+    let win = init_win(
+        win_alloc,
+        sel("initWithContentRect:styleMask:backing:defer:"),
+        NSRect::new(0.0, 0.0, width, height),
+        style_mask,
+        2, // NSBackingStoreBuffered
+        0,
+    );
+    msg1_bool(win, sel("setReleasedWhenClosed:"), 0);
+    msg1_ptr(win, sel("setTitle:"), nsstring(title));
+    let content_view = msg0(win, sel("contentView"));
+    (win, content_view, delegate)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_label(content_view: *mut c_void, text: &str, rect: NSRect) {
+    let msg1_ptr_ret: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_rect: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let label = msg1_ptr_ret(cls("NSTextField"), sel("labelWithString:"), nsstring(text));
+    msg1_rect(label, sel("setFrame:"), rect);
+    msg1_ptr(content_view, sel("addSubview:"), label);
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_checkbox(
+    content_view: *mut c_void,
+    delegate: *mut c_void,
+    title: &str,
+    checked: bool,
+    tag: isize,
+    rect: NSRect,
+) {
+    let msg3_btn: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_rect: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let btn = msg3_btn(
+        cls("NSButton"),
+        sel("checkboxWithTitle:target:action:"),
+        nsstring(title),
+        delegate,
+        sel("onCheckboxToggled:"),
+    );
+    msg1_isize(btn, sel("setState:"), if checked { 1 } else { 0 });
+    msg1_isize(btn, sel("setTag:"), tag);
+    msg1_rect(btn, sel("setFrame:"), rect);
+    msg1_ptr(content_view, sel("addSubview:"), btn);
+}
+
+/// Builds the native Cocoa Control Panel (`Bảng điều khiển`) `NSWindow` matching `ViewController.m`.
+#[cfg(target_os = "macos")]
+pub unsafe fn build_control_panel_window(ui: &AppUiController) -> *mut c_void {
+    let (win, cv, delegate) = create_base_window("OpenKey 2.0.5 - Bộ gõ Tiếng Việt", 520.0, 440.0);
+    let cfg = &ui.handler.engine.config;
+
+    add_label(
+        cv,
+        &format!(
+            "Chế độ: {} | Kiểu gõ: {} | Bảng mã: {}",
+            if cfg.language == 1 { "Tiếng Việt" } else { "Tiếng Anh" },
+            match cfg.input_type {
+                1 => "VNI",
+                2 => "Simple Telex 1",
+                3 => "Simple Telex 2",
+                _ => "Telex",
+            },
+            openkey_macos::config::TABLE_CODE_NAMES
+                .get(cfg.code_table as usize)
+                .copied()
+                .unwrap_or("Unicode"),
+        ),
+        NSRect::new(20.0, 400.0, 480.0, 24.0),
+    );
+
+    let checkboxes = [
+        (1, "Đặt dấu oà, uý (thay vì òa, úy)", cfg.use_modern_orthography != 0),
+        (2, "Kiểm tra chính tả", cfg.check_spelling != 0),
+        (3, "Tự khôi phục phím với từ sai", cfg.restore_if_wrong_spelling != 0),
+        (4, "Gõ nhanh (cc=ch, gg=gi, kk=kh, nn=ng, qq=qu, pp=ph, tt=th)", cfg.quick_telex != 0),
+        (5, "Sửa lỗi gợi ý (trình duyệt, Excel...)", cfg.fix_recommend_browser != 0),
+        (6, "Cho phép gõ tắt (Macro)", cfg.use_macro != 0),
+        (7, "Bật gõ tắt cả khi tắt tiếng Việt", cfg.use_macro_in_english_mode != 0),
+        (8, "Tự động viết hoa theo phím gõ tắt", cfg.auto_caps_macro != 0),
+        (9, "Chuyển chế độ thông minh theo ứng dụng", cfg.use_smart_switch_key != 0),
+        (10, "Viết hoa chữ cái đầu câu", cfg.upper_case_first_char != 0),
+        (11, "Cho phép f, z, w, j làm phụ âm đầu", cfg.allow_consonant_zfwj != 0),
+        (12, "Gõ tắt phụ âm đầu (f->ph, j->gi, w->qu)", cfg.quick_start_consonant != 0),
+        (13, "Gõ tắt phụ âm cuối (g->ng, h->nh, k->ch)", cfg.quick_end_consonant != 0),
+        (14, "Tự ghi nhớ bảng mã theo ứng dụng", cfg.remember_code != 0),
+        (15, "Tạm tắt tiếng Việt khi dùng ngôn ngữ khác", cfg.other_language != 0),
+        (18, "Biểu tượng xám trên thanh Menu", ui.config.gray_icon),
+        (19, "Khởi động cùng macOS", ui.config.run_on_startup),
+    ];
+
+    for (idx, &(tag, title, checked)) in checkboxes.iter().enumerate() {
+        let col = idx / 9;
+        let row = idx % 9;
+        let x = 20.0 + (col as f64) * 250.0;
+        let y = 360.0 - (row as f64) * 34.0;
+        add_checkbox(cv, delegate, title, checked, tag, NSRect::new(x, y, 240.0, 24.0));
+    }
+
+    win
+}
+
+/// Builds the native Cocoa Macro Editor (`Bảng gõ tắt`) `NSWindow` matching `MacroViewController.mm`.
+#[cfg(target_os = "macos")]
+pub unsafe fn build_macro_window(ui: &AppUiController) -> *mut c_void {
+    let (win, cv, delegate) = create_base_window("Bảng gõ tắt - OpenKey", 460.0, 320.0);
+    let macros = ui.handler.engine.macros.get_all_macros();
+    add_label(
+        cv,
+        &format!("Danh sách gõ tắt ({} mục):", macros.len()),
+        NSRect::new(20.0, 275.0, 420.0, 24.0),
+    );
+    let preview = macros
+        .iter()
+        .take(8)
+        .map(|(_, k, v)| format!("• {}  →  {}", k, v))
+        .collect::<Vec<_>>()
+        .join("\n");
+    add_label(
+        cv,
+        if preview.is_empty() {
+            "(Chưa có dữ liệu gõ tắt)"
+        } else {
+            &preview
+        },
+        NSRect::new(20.0, 100.0, 420.0, 165.0),
+    );
+    add_checkbox(
+        cv,
+        delegate,
+        "Tự động đổi chữ hoa theo phím tắt",
+        ui.handler.engine.config.auto_caps_macro != 0,
+        8,
+        NSRect::new(20.0, 55.0, 320.0, 24.0),
+    );
+    add_checkbox(
+        cv,
+        delegate,
+        "Bật gõ tắt",
+        ui.handler.engine.config.use_macro != 0,
+        6,
+        NSRect::new(20.0, 25.0, 200.0, 24.0),
+    );
+    win
+}
+
+/// Builds the native Cocoa Convert Tool (`Công cụ chuyển mã`) `NSWindow` matching `ConvertToolViewController.mm`.
+#[cfg(target_os = "macos")]
+pub unsafe fn build_convert_tool_window(ui: &AppUiController) -> *mut c_void {
+    let (win, cv, delegate) = create_base_window("Công cụ chuyển mã - OpenKey", 420.0, 280.0);
+    let ct = &ui.handler.engine.convert_tool;
+    add_label(
+        cv,
+        &format!(
+            "Nguồn: {}  →  Đích: {}",
+            openkey_macos::config::TABLE_CODE_NAMES
+                .get(ct.from_code as usize)
+                .copied()
+                .unwrap_or("Unicode"),
+            openkey_macos::config::TABLE_CODE_NAMES
+                .get(ct.to_code as usize)
+                .copied()
+                .unwrap_or("Unicode"),
+        ),
+        NSRect::new(20.0, 235.0, 380.0, 24.0),
+    );
+    add_checkbox(cv, delegate, "Loại bỏ dấu câu (Xoá dấu)", ct.remove_mark, 20, NSRect::new(20.0, 195.0, 300.0, 24.0));
+    add_checkbox(cv, delegate, "Chuyển sang chữ HOA", ct.to_all_caps, 21, NSRect::new(20.0, 160.0, 300.0, 24.0));
+    add_checkbox(cv, delegate, "Chuyển sang chữ thường", ct.to_all_non_caps, 22, NSRect::new(20.0, 125.0, 300.0, 24.0));
+    add_checkbox(cv, delegate, "Viết hoa chữ đầu câu", ct.to_caps_first_letter, 23, NSRect::new(20.0, 90.0, 300.0, 24.0));
+    add_checkbox(cv, delegate, "Viết hoa chữ đầu mỗi từ", ct.to_caps_each_word, 24, NSRect::new(20.0, 55.0, 300.0, 24.0));
+    win
+}
+
+/// Builds the native Cocoa About (`Giới thiệu`) `NSWindow` matching `AboutViewController.m`.
+#[cfg(target_os = "macos")]
+pub unsafe fn build_about_window(_ui: &AppUiController) -> *mut c_void {
+    let (win, cv, _delegate) = create_base_window("Giới thiệu OpenKey", 380.0, 200.0);
+    add_label(cv, "OpenKey 2.0.5 (Rust macOS Port)", NSRect::new(20.0, 150.0, 340.0, 24.0));
+    add_label(cv, "Bộ gõ Tiếng Việt nguồn mở cho macOS", NSRect::new(20.0, 115.0, 340.0, 24.0));
+    add_label(cv, "Tác giả bản gốc: Mai Vũ Tuyên | Giấy phép: GPL-3.0", NSRect::new(20.0, 80.0, 340.0, 24.0));
+    win
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn cocoa_window_title(win: *mut c_void) -> String {
+    if win.is_null() {
+        return String::new();
+    }
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let utf8: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *const c_char =
+        std::mem::transmute(objc_msgSend as *const ());
+    let title_ns = msg0(win, sel("title"));
+    if title_ns.is_null() {
+        return String::new();
+    }
+    let c_ptr = utf8(title_ns, sel("UTF8String"));
+    if c_ptr.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(c_ptr).to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn cocoa_window_subview_count(win: *mut c_void) -> usize {
+    if win.is_null() {
+        return 0;
+    }
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg0_usize: unsafe extern "C" fn(*mut c_void, *mut c_void) -> usize =
+        std::mem::transmute(objc_msgSend as *const ());
+    let cv = msg0(win, sel("contentView"));
+    if cv.is_null() {
+        return 0;
+    }
+    let subviews = msg0(cv, sel("subviews"));
+    if subviews.is_null() {
+        0
+    } else {
+        msg0_usize(subviews, sel("count"))
     }
 }
 
