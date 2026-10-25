@@ -19,7 +19,7 @@ fn main() {
         assert!(!cp_win.is_null());
         assert_eq!(
             cocoa_window_title(cp_win),
-            "OpenKey 2.0.5 - Bộ gõ Tiếng Việt"
+            "OpenKey 2.1.0 - Bộ gõ Tiếng Việt"
         );
         assert_eq!(cocoa_window_content_size(cp_win), (560, 490));
         assert!(cocoa_window_subview_count(cp_win) >= 20);

@@ -442,9 +442,9 @@ pub fn create_macos_app_bundle(out_dir: &Path) -> Result<PathBuf, String> {
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.0.5</string>
+    <string>2.1.0</string>
     <key>CFBundleVersion</key>
-    <string>62</string>
+    <string>63</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>
@@ -1429,7 +1429,7 @@ unsafe fn add_bottom_icon_button(
 /// Builds the native Cocoa Control Panel (`Bảng điều khiển`) `NSWindow` matching `Main.storyboard` and `openkey-main-control-2.png`.
 #[cfg(target_os = "macos")]
 pub unsafe fn build_control_panel_window(ui: &AppUiController) -> *mut c_void {
-    let (win, cv, delegate) = create_base_window("OpenKey 2.0.5 - Bộ gõ Tiếng Việt", 560.0, 490.0);
+    let (win, cv, delegate) = create_base_window(&format!("OpenKey {} - Bộ gõ Tiếng Việt", env!("CARGO_PKG_VERSION")), 560.0, 490.0);
     ACTIVE_CP_WINDOW.store(win, Ordering::SeqCst);
     let cfg = &ui.handler.engine.config;
 
@@ -1541,7 +1541,7 @@ pub unsafe fn build_control_panel_window(ui: &AppUiController) -> *mut c_void {
     add_label(cv3, "OpenKey - Bộ gõ Tiếng Việt nguồn mở đa nền tảng", NSRect::new(78.0, 185.0, 394.0, 20.0));
     add_label(cv3, "Trang chủ: https://open-key.org", NSRect::new(78.0, 155.0, 340.0, 17.0));
     add_label(cv3, "Facebook: https://www.facebook.com/OpenKeyVN", NSRect::new(78.0, 132.0, 360.0, 17.0));
-    add_label(cv3, "Phiên bản 2.0.5 (build 62) - Rust macOS Port", NSRect::new(78.0, 102.0, 418.0, 18.0));
+    add_label(cv3, &format!("Phiên bản {} (build 63) - Rust macOS Port", env!("CARGO_PKG_VERSION")), NSRect::new(78.0, 102.0, 418.0, 18.0));
     add_label(
         cv3,
         "OpenKey cho macOS là phần mềm mã nguồn mở và được phát hành miễn phí.",
@@ -1732,7 +1732,7 @@ pub unsafe fn build_convert_tool_window(ui: &AppUiController) -> *mut c_void {
 #[cfg(target_os = "macos")]
 pub unsafe fn build_about_window(_ui: &AppUiController) -> *mut c_void {
     let (win, cv, _delegate) = create_base_window("Giới thiệu OpenKey", 380.0, 200.0);
-    add_label(cv, "OpenKey 2.0.5 (Rust macOS Port)", NSRect::new(20.0, 150.0, 340.0, 24.0));
+    add_label(cv, &format!("OpenKey {} (Rust macOS Port)", env!("CARGO_PKG_VERSION")), NSRect::new(20.0, 150.0, 340.0, 24.0));
     add_label(cv, "Bộ gõ Tiếng Việt nguồn mở cho macOS", NSRect::new(20.0, 115.0, 340.0, 24.0));
     add_label(cv, "Tác giả bản gốc: Mai Vũ Tuyên | Giấy phép: GPL-3.0", NSRect::new(20.0, 80.0, 340.0, 24.0));
     win
