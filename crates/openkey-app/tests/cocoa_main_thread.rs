@@ -1,7 +1,8 @@
 use openkey_app::ui::{
     build_about_window, build_control_panel_window, build_convert_tool_window, build_macro_window,
-    cocoa_control_panel_active_tab, cocoa_window_content_size, cocoa_window_subview_count,
-    cocoa_window_title, setup_cocoa_status_bar, show_control_panel_tab, AppUiController,
+    cocoa_control_panel_active_tab, cocoa_control_panel_tab_is_highlighted,
+    cocoa_window_content_size, cocoa_window_subview_count, cocoa_window_title,
+    setup_cocoa_status_bar, show_control_panel_tab, AppUiController,
 };
 
 fn main() {
@@ -24,9 +25,20 @@ fn main() {
 
         // Verify 4 tabs (0: Bộ gõ, 1: Gõ tắt, 2: Hệ thống, 3: Thông tin) switch cleanly
         assert_eq!(cocoa_control_panel_active_tab(), 0);
+        assert!(cocoa_control_panel_tab_is_highlighted(0));
+        assert!(!cocoa_control_panel_tab_is_highlighted(1));
         for tab_idx in [1, 2, 3, 0] {
             show_control_panel_tab(tab_idx);
             assert_eq!(cocoa_control_panel_active_tab(), tab_idx);
+            for i in 0..4 {
+                assert_eq!(
+                    cocoa_control_panel_tab_is_highlighted(i),
+                    i == tab_idx,
+                    "tab {} highlight mismatch when active tab is {}",
+                    i,
+                    tab_idx
+                );
+            }
         }
 
         let macro_win = build_macro_window(&ui);

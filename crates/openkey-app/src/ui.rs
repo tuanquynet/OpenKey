@@ -687,12 +687,19 @@ static ACTIVE_CP_TAB_BOXES: [AtomicPtr<c_void>; 4] = [
     AtomicPtr::new(std::ptr::null_mut()),
     AtomicPtr::new(std::ptr::null_mut()),
 ];
+static ACTIVE_CP_TAB_PILLS: [AtomicPtr<c_void>; 4] = [
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+];
 static ACTIVE_CP_TAB_BUTTONS: [AtomicPtr<c_void>; 4] = [
     AtomicPtr::new(std::ptr::null_mut()),
     AtomicPtr::new(std::ptr::null_mut()),
     AtomicPtr::new(std::ptr::null_mut()),
     AtomicPtr::new(std::ptr::null_mut()),
 ];
+const TAB_TITLES: [&str; 4] = ["Bộ gõ", "Gõ tắt", "Hệ thống", "Thông tin"];
 static ACTIVE_CP_RADIO_VIET: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static ACTIVE_CP_RADIO_ENG: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -701,24 +708,141 @@ pub fn cocoa_control_panel_active_tab() -> usize {
 }
 
 #[cfg(target_os = "macos")]
+unsafe fn set_button_colored_title(btn: *mut c_void, title: &str, color: *mut c_void) {
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_f64_ret: unsafe extern "C" fn(*mut c_void, *mut c_void, f64) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg2_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let init_attr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let dict = msg0(cls("NSMutableDictionary"), sel("dictionary"));
+    if !color.is_null() {
+        msg2_ptr(dict, sel("setObject:forKey:"), color, nsstring("NSColor"));
+    }
+    let font = msg1_f64_ret(cls("NSFont"), sel("systemFontOfSize:"), 13.0);
+    if !font.is_null() {
+        msg2_ptr(dict, sel("setObject:forKey:"), font, nsstring("NSFont"));
+    }
+    let para = msg0(msg0(cls("NSMutableParagraphStyle"), sel("alloc")), sel("init"));
+    if !para.is_null() {
+        msg1_isize(para, sel("setAlignment:"), 1); // NSTextAlignmentCenter
+        msg2_ptr(dict, sel("setObject:forKey:"), para, nsstring("NSParagraphStyle"));
+    }
+    let attr_str = init_attr(
+        msg0(cls("NSAttributedString"), sel("alloc")),
+        sel("initWithString:attributes:"),
+        nsstring(title),
+        dict,
+    );
+    msg1_ptr(btn, sel("setAttributedTitle:"), attr_str);
+}
+
+#[cfg(target_os = "macos")]
 pub unsafe fn show_control_panel_tab(index: usize) {
     let idx = index.min(3);
     ACTIVE_CP_TAB_INDEX.store(idx as isize, Ordering::SeqCst);
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
     let msg1_bool: unsafe extern "C" fn(*mut c_void, *mut c_void, i8) =
         std::mem::transmute(objc_msgSend as *const ());
     let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
         std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let active_fill = msg0(cls("NSColor"), sel("systemBlueColor"));
+    let inactive_fill = msg0(cls("NSColor"), sel("controlBackgroundColor"));
+    let inactive_border = msg0(cls("NSColor"), sel("separatorColor"));
+    let white_text = msg0(cls("NSColor"), sel("whiteColor"));
+    let normal_text = msg0(cls("NSColor"), sel("labelColor"));
 
     for i in 0..4 {
+        let is_selected = i == idx;
         let box_ptr = ACTIVE_CP_TAB_BOXES[i].load(Ordering::SeqCst);
         if !box_ptr.is_null() {
-            msg1_bool(box_ptr, sel("setHidden:"), if i == idx { 0 } else { 1 });
+            msg1_bool(box_ptr, sel("setHidden:"), if is_selected { 0 } else { 1 });
+        }
+        let pill_ptr = ACTIVE_CP_TAB_PILLS[i].load(Ordering::SeqCst);
+        if !pill_ptr.is_null() {
+            msg1_ptr(
+                pill_ptr,
+                sel("setFillColor:"),
+                if is_selected { active_fill } else { inactive_fill },
+            );
+            msg1_ptr(
+                pill_ptr,
+                sel("setBorderColor:"),
+                if is_selected { active_fill } else { inactive_border },
+            );
+            msg1_bool(pill_ptr, sel("setNeedsDisplay:"), 1);
         }
         let btn_ptr = ACTIVE_CP_TAB_BUTTONS[i].load(Ordering::SeqCst);
         if !btn_ptr.is_null() {
-            msg1_isize(btn_ptr, sel("setState:"), if i == idx { 1 } else { 0 });
+            msg1_isize(btn_ptr, sel("setState:"), if is_selected { 1 } else { 0 });
+            set_button_colored_title(
+                btn_ptr,
+                TAB_TITLES[i],
+                if is_selected { white_text } else { normal_text },
+            );
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn cocoa_control_panel_tab_is_highlighted(tab_idx: usize) -> bool {
+    if tab_idx >= 4 {
+        return false;
+    }
+    let pill = ACTIVE_CP_TAB_PILLS[tab_idx].load(Ordering::SeqCst);
+    if pill.is_null() {
+        return false;
+    }
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_bounds: unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSRect =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_rep: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_cache: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_color_at: unsafe extern "C" fn(*mut c_void, *mut c_void, isize, isize) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr_ret: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_comp: unsafe extern "C" fn(*mut c_void, *mut c_void) -> f64 =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let win = ACTIVE_CP_WINDOW.load(Ordering::SeqCst);
+    if !win.is_null() {
+        let msg_void: unsafe extern "C" fn(*mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+        msg_void(win, sel("displayIfNeeded"));
+    }
+    let bounds = msg_bounds(pill, sel("bounds"));
+    let rep = msg_rep(pill, sel("bitmapImageRepForCachingDisplayInRect:"), bounds);
+    if rep.is_null() {
+        return false;
+    }
+    msg_cache(pill, sel("cacheDisplayInRect:toBitmapImageRep:"), bounds, rep);
+    let c = msg_color_at(rep, sel("colorAtX:y:"), 8, 12);
+    if c.is_null() {
+        return false;
+    }
+    let srgb = msg0(cls("NSColorSpace"), sel("sRGBColorSpace"));
+    let rgb = msg1_ptr_ret(c, sel("colorUsingColorSpace:"), srgb);
+    if rgb.is_null() {
+        return false;
+    }
+    let r = msg_comp(rgb, sel("redComponent"));
+    let b = msg_comp(rgb, sel("blueComponent"));
+    b > r + 0.30
 }
 
 #[cfg(target_os = "macos")]
@@ -1350,28 +1474,37 @@ pub unsafe fn build_control_panel_window(ui: &AppUiController) -> *mut c_void {
         std::mem::transmute(objc_msgSend as *const ());
     let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
         std::mem::transmute(objc_msgSend as *const ());
+    let msg1_bool: unsafe extern "C" fn(*mut c_void, *mut c_void, i8) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_f64: unsafe extern "C" fn(*mut c_void, *mut c_void, f64) =
+        std::mem::transmute(objc_msgSend as *const ());
 
-    for (idx, (title, x)) in [
-        ("Bộ gõ", 56.0),
-        ("Gõ tắt", 165.0),
-        ("Hệ thống", 274.0),
-        ("Thông tin", 383.0),
-    ]
-    .iter()
-    .enumerate()
-    {
+    for (idx, x) in [62.0, 171.0, 280.0, 389.0].iter().enumerate() {
+        let pill = init_frame(
+            msg0(cls("NSBox"), sel("alloc")),
+            sel("initWithFrame:"),
+            NSRect::new(*x, 309.0, 109.0, 24.0),
+        );
+        msg1_isize(pill, sel("setBoxType:"), 4); // NSBoxCustom
+        msg1_isize(pill, sel("setTitlePosition:"), 0); // NSNoTitle
+        msg1_f64(pill, sel("setCornerRadius:"), 5.0);
+        msg1_f64(pill, sel("setBorderWidth:"), 1.0);
+        msg1_ptr(cv, sel("addSubview:"), pill);
+        let pill_cv = msg0(pill, sel("contentView"));
+
         let btn = init_frame(
             msg0(cls("NSButton"), sel("alloc")),
             sel("initWithFrame:"),
-            NSRect::new(*x, 303.0, 122.0, 32.0),
+            NSRect::new(0.0, 0.0, 107.0, 22.0),
         );
-        msg1_ptr(btn, sel("setTitle:"), nsstring(title));
-        msg1_isize(btn, sel("setBezelStyle:"), 1); // NSBezelStyleRounded
-        msg1_isize(btn, sel("setButtonType:"), 2); // NSButtonTypePushOnPushOff
+        msg1_bool(btn, sel("setBordered:"), 0);
+        msg1_isize(btn, sel("setButtonType:"), 0); // NSButtonTypeMomentaryLight
         msg1_isize(btn, sel("setTag:"), idx as isize);
         msg1_ptr(btn, sel("setTarget:"), delegate);
         msg1_ptr(btn, sel("setAction:"), sel("onTabButtonClicked:"));
-        msg1_ptr(cv, sel("addSubview:"), btn);
+        msg1_ptr(pill_cv, sel("addSubview:"), btn);
+
+        ACTIVE_CP_TAB_PILLS[idx].store(pill, Ordering::SeqCst);
         ACTIVE_CP_TAB_BUTTONS[idx].store(btn, Ordering::SeqCst);
     }
 
