@@ -1,0 +1,22 @@
+[package]
+name = "openkey-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "openkey_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "openkey"
+path = "src/main.rs"
+
+
+[[test]]
+name = "cocoa_main_thread"
+path = "tests/cocoa_main_thread.rs"
+harness = false
+[dependencies]
+openkey-engine = { path = "../openkey-engine" }
+openkey-macos = { path = "../openkey-macos" }

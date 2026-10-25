@@ -1,0 +1,72 @@
+use openkey_app::ui::{
+    build_about_window, build_control_panel_window, build_convert_tool_window, build_macro_window,
+    cocoa_control_panel_active_tab, cocoa_control_panel_tab_is_highlighted,
+    cocoa_control_panel_tab_text_padding_diff, cocoa_window_content_size,
+    cocoa_window_subview_count, cocoa_window_title, setup_cocoa_status_bar,
+    show_control_panel_tab, AppUiController,
+};
+
+fn main() {
+    let mut ui = AppUiController::with_domain("com.tuyenmai.openkey.rust_window_test");
+    ui.load_default_config();
+    ui.handler.engine.macros.add_macro("vn", "Việt Nam", 0);
+
+    unsafe {
+        let status_item = setup_cocoa_status_bar(&ui);
+        assert!(!status_item.is_null());
+
+        let cp_win = build_control_panel_window(&ui);
+        assert!(!cp_win.is_null());
+        assert_eq!(
+            cocoa_window_title(cp_win),
+            "OpenKey 2.1.0 - Bộ gõ Tiếng Việt"
+        );
+        assert_eq!(cocoa_window_content_size(cp_win), (560, 490));
+        assert!(cocoa_window_subview_count(cp_win) >= 20);
+
+        // Verify 4 tabs (0: Bộ gõ, 1: Gõ tắt, 2: Hệ thống, 3: Thông tin) switch cleanly
+        assert_eq!(cocoa_control_panel_active_tab(), 0);
+        assert!(cocoa_control_panel_tab_is_highlighted(0));
+        assert!(!cocoa_control_panel_tab_is_highlighted(1));
+        let (v_diff, h_diff) = cocoa_control_panel_tab_text_padding_diff(0);
+        assert!(
+            v_diff <= 3 && h_diff <= 3,
+            "expected centered tab text (v_diff <= 3, h_diff <= 3), got v_diff={}, h_diff={}",
+            v_diff,
+            h_diff
+        );
+        for tab_idx in [1, 2, 3, 0] {
+            show_control_panel_tab(tab_idx);
+            assert_eq!(cocoa_control_panel_active_tab(), tab_idx);
+            for i in 0..4 {
+                assert_eq!(
+                    cocoa_control_panel_tab_is_highlighted(i),
+                    i == tab_idx,
+                    "tab {} highlight mismatch when active tab is {}",
+                    i,
+                    tab_idx
+                );
+            }
+        }
+
+        let macro_win = build_macro_window(&ui);
+        assert!(!macro_win.is_null());
+        assert_eq!(cocoa_window_title(macro_win), "Bảng gõ tắt - OpenKey");
+        assert!(cocoa_window_subview_count(macro_win) >= 4);
+
+        let convert_win = build_convert_tool_window(&ui);
+        assert!(!convert_win.is_null());
+        assert_eq!(
+            cocoa_window_title(convert_win),
+            "Công cụ chuyển mã - OpenKey"
+        );
+        assert!(cocoa_window_subview_count(convert_win) >= 6);
+
+        let about_win = build_about_window(&ui);
+        assert!(!about_win.is_null());
+        assert_eq!(cocoa_window_title(about_win), "Giới thiệu OpenKey");
+        assert!(cocoa_window_subview_count(about_win) >= 3);
+    }
+
+    println!("running 1 test\ntest cocoa_main_thread_windows_and_status_bar ... ok\n\ntest result: ok. 1 passed; 0 failed");
+}

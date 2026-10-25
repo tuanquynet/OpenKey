@@ -2,6 +2,11 @@
 
 ##### OpenKey for Linux: (in development)
 
+##### Version 2.1.0: (25/10/2026)
+- Port toàn bộ bộ gõ OpenKey cho macOS (`openkey-engine`, `openkey-macos`, `openkey-app`) sang Rust thuần túy, tương thích 100% dữ liệu và cấu hình `com.tuyenmai.openkey`.
+- Tự động kích hoạt lại `CGEventTap` khi macOS tắt event tap do timeout hoặc user input.
+- Cải thiện giao diện Bảng điều khiển 4 tab (`Bộ gõ`, `Gõ tắt`, `Hệ thống`, `Thông tin`) và tự động kết nối `CGEventTap` ngay khi được cấp quyền Accessibility.
+
 ##### Version 1.2 RC5: (26/08/2019)
 - Sửa lỗi không gõ được chữ "quởn".
 - Không kiểm tra chính tả khi sử dụng dấu "[ ] { }".
