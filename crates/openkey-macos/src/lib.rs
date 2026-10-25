@@ -253,4 +253,10 @@ mod tests {
         // PID 1 (launchd) is owned by root, not current non-root user
         assert!(!is_process_owned_by_current_user(1));
     }
+
+    #[test]
+    fn queries_frontmost_application_bundle_id() {
+        let app = frontmost_application_bundle_id();
+        assert!(!app.is_empty());
+    }
 }

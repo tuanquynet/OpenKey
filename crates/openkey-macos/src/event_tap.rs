@@ -60,12 +60,37 @@ pub type CGEventTapCallBack = unsafe extern "C" fn(
 #[link(name = "ApplicationServices", kind = "framework")]
 #[link(name = "Carbon", kind = "framework")]
 #[link(name = "AudioToolbox", kind = "framework")]
+#[link(name = "AppKit", kind = "framework")]
+#[link(name = "objc")]
 extern "C" {
     static kCFRunLoopCommonModes: CFStringRef;
     static kCGWindowOwnerName: CFStringRef;
     static kTISPropertyInputSourceLanguages: CFStringRef;
+    static kAXTrustedCheckOptionPrompt: CFStringRef;
+    static kCFBooleanTrue: CFTypeRef;
 
     fn CFRelease(cf: CFTypeRef);
+    fn CFDictionaryCreate(
+        allocator: CFTypeRef,
+        keys: *const *const c_void,
+        values: *const *const c_void,
+        num_values: isize,
+        key_call_backs: *const c_void,
+        value_call_backs: *const c_void,
+    ) -> CFDictionaryRef;
+    fn CFAbsoluteTimeGetCurrent() -> f64;
+    fn CFRunLoopGetMain() -> CFRunLoopRef;
+    fn CFRunLoopTimerCreate(
+        allocator: CFTypeRef,
+        fire_date: f64,
+        interval: f64,
+        flags: usize,
+        order: isize,
+        callout: unsafe extern "C" fn(*mut c_void, *mut c_void),
+        context: *mut CFRunLoopTimerContext,
+    ) -> *mut c_void;
+    fn CFRunLoopAddTimer(rl: CFRunLoopRef, timer: *mut c_void, mode: CFStringRef);
+    fn CFRunLoopTimerInvalidate(timer: *mut c_void);
     fn CFArrayGetCount(the_array: CFArrayRef) -> isize;
     fn CFArrayGetValueAtIndex(the_array: CFArrayRef, idx: isize) -> *const c_void;
     fn CFDictionaryGetValue(the_dict: CFDictionaryRef, key: *const c_void) -> *const c_void;
@@ -136,6 +161,10 @@ extern "C" {
 
     fn AudioServicesPlayAlertSound(in_system_sound_id: u32);
     fn AXIsProcessTrusted() -> bool;
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    fn objc_getClass(name: *const std::ffi::c_char) -> *mut c_void;
+    fn sel_registerName(name: *const std::ffi::c_char) -> *mut c_void;
+    fn objc_msgSend();
     fn getuid() -> u32;
     fn proc_pidinfo(
         pid: i32,
@@ -159,6 +188,97 @@ pub fn is_accessibility_trusted() -> bool {
     #[cfg(not(target_os = "macos"))]
     {
         false
+    }
+}
+
+#[repr(C)]
+pub struct CFRunLoopTimerContext {
+    pub version: isize,
+    pub info: *mut c_void,
+    pub retain: *const c_void,
+    pub release: *const c_void,
+    pub copy_description: *const c_void,
+}
+
+/// Prompts macOS to display the native Accessibility permission dialog (`AXIsProcessTrustedWithOptions` with `kAXTrustedCheckOptionPrompt: kCFBooleanTrue`).
+pub fn prompt_accessibility_permission() -> bool {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let keys = [kAXTrustedCheckOptionPrompt as *const c_void];
+        let values = [kCFBooleanTrue];
+        let dict = CFDictionaryCreate(
+            ptr::null(),
+            keys.as_ptr(),
+            values.as_ptr(),
+            1,
+            ptr::null(),
+            ptr::null(),
+        );
+        let trusted = AXIsProcessTrustedWithOptions(dict);
+        if !dict.is_null() {
+            CFRelease(dict);
+        }
+        trusted
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
+/// Queries `[[NSWorkspace sharedWorkspace] frontmostApplication].bundleIdentifier`, matching `queryFrontMostApp()` in `OpenKey.mm`.
+pub fn frontmost_application_bundle_id() -> String {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const ());
+        let utf8: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *const std::ffi::c_char =
+            std::mem::transmute(objc_msgSend as *const ());
+
+        let ws_cls = objc_getClass(b"NSWorkspace\0".as_ptr() as *const std::ffi::c_char);
+        if ws_cls.is_null() {
+            return "UnknownApp".to_string();
+        }
+        let shared_sel = sel_registerName(b"sharedWorkspace\0".as_ptr() as *const std::ffi::c_char);
+        let ws = msg0(ws_cls, shared_sel);
+        if ws.is_null() {
+            return "UnknownApp".to_string();
+        }
+        let front_sel =
+            sel_registerName(b"frontmostApplication\0".as_ptr() as *const std::ffi::c_char);
+        let app = msg0(ws, front_sel);
+        if app.is_null() {
+            return "UnknownApp".to_string();
+        }
+        let bundle_sel =
+            sel_registerName(b"bundleIdentifier\0".as_ptr() as *const std::ffi::c_char);
+        let mut ns_str = msg0(app, bundle_sel);
+        if ns_str.is_null() {
+            let name_sel =
+                sel_registerName(b"localizedName\0".as_ptr() as *const std::ffi::c_char);
+            ns_str = msg0(app, name_sel);
+        }
+        if ns_str.is_null() {
+            return "UnknownApp".to_string();
+        }
+        let utf8_sel = sel_registerName(b"UTF8String\0".as_ptr() as *const std::ffi::c_char);
+        let c_ptr = utf8(ns_str, utf8_sel);
+        if c_ptr.is_null() {
+            "UnknownApp".to_string()
+        } else {
+            let s = std::ffi::CStr::from_ptr(c_ptr)
+                .to_string_lossy()
+                .into_owned();
+            if s.is_empty() {
+                "UnknownApp".to_string()
+            } else {
+                s
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "UnknownApp".to_string()
     }
 }
 
@@ -536,6 +656,14 @@ unsafe extern "C" fn openkey_cg_event_callback(
     };
 
     if ev_type == MacEventType::KeyDown {
+        let front_app = frontmost_application_bundle_id();
+        if front_app != crate::config::OPENKEY_BUNDLE && front_app != ctx.handler.frontmost_app {
+            if ctx.handler.engine.config.use_smart_switch_key != 0 {
+                ctx.handler.on_active_app_changed(&front_app, &mut ctx.sender);
+            } else {
+                ctx.handler.frontmost_app = front_app;
+            }
+        }
         if ctx.handler.perform_layout_compat {
             keycode = convert_cg_event_to_layout_compat_keycode(event, keycode);
         }
@@ -544,7 +672,6 @@ unsafe extern "C" fn openkey_cg_event_callback(
             ctx.handler.current_input_source_is_english = is_current_input_source_english();
         }
     }
-
     match ctx
         .handler
         .handle_raw_event(ev_type, keycode, flags, is_own, &mut ctx.sender)
@@ -588,6 +715,46 @@ impl EventTapContext {
             Ok(())
         }
     }
+    #[cfg(target_os = "macos")]
+    pub fn start_accessibility_retry_timer(&mut self) {
+        unsafe extern "C" fn retry_timer_cb(timer: *mut c_void, info: *mut c_void) {
+            if info.is_null() {
+                return;
+            }
+            let ctx = &mut *(info as *mut EventTapContext);
+            if !ctx.sender.event_tap.is_null() {
+                CFRunLoopTimerInvalidate(timer);
+                return;
+            }
+            if ctx.start_event_tap().is_ok() {
+                CFRunLoopTimerInvalidate(timer);
+            }
+        }
+
+        unsafe {
+            let mut timer_ctx = CFRunLoopTimerContext {
+                version: 0,
+                info: (self as *mut EventTapContext) as *mut c_void,
+                retain: ptr::null(),
+                release: ptr::null(),
+                copy_description: ptr::null(),
+            };
+            let timer = CFRunLoopTimerCreate(
+                ptr::null(),
+                CFAbsoluteTimeGetCurrent() + 1.0,
+                1.0,
+                0,
+                0,
+                retry_timer_cb,
+                &mut timer_ctx,
+            );
+            if !timer.is_null() {
+                CFRunLoopAddTimer(CFRunLoopGetMain(), timer, kCFRunLoopCommonModes);
+                CFRelease(timer);
+            }
+        }
+    }
+
 
     #[cfg(target_os = "macos")]
     pub fn run_loop(&self) {

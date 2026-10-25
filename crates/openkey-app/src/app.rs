@@ -4,7 +4,10 @@ use openkey_engine::convert_tool::{convert_util, ConvertToolConfig};
 use openkey_engine::macro_store::MacroStore;
 use openkey_engine::types::InputType;
 use openkey_macos::config::{MacConfig, TABLE_CODE_NAMES};
-use openkey_macos::event_tap::{is_accessibility_trusted, CoreGraphicsEventSender, EventTapContext};
+use openkey_macos::event_tap::{
+    is_accessibility_trusted, prompt_accessibility_permission, CoreGraphicsEventSender,
+    EventTapContext,
+};
 use openkey_macos::handler::MacEventHandler;
 use openkey_macos::sender::RecordingEventSender;
 use crate::ui::{
@@ -238,7 +241,10 @@ fn handle_run(args: &[String]) -> Result<String, String> {
             run_loop_source: std::ptr::null_mut(),
         }));
         register_active_runtime(ctx_ptr, status_item);
-        let _ = (*ctx_ptr).start_event_tap();
+        if (*ctx_ptr).start_event_tap().is_err() {
+            let _ = prompt_accessibility_permission();
+            (*ctx_ptr).start_accessibility_retry_timer();
+        }
         run_cocoa_app_loop();
         (*ctx_ptr).stop_event_tap();
     }
@@ -363,6 +369,17 @@ mod tests {
         assert!(app_dir.join("Resources").join("Status.png").exists());
         assert!(app_dir.join("Resources").join("StatusEng.png").exists());
 
+        assert!(app_dir.join("_CodeSignature").join("CodeResources").exists());
+        let cs_out = std::process::Command::new("codesign")
+            .args(["-dv", tmp_dir.join("OpenKey.app").to_str().unwrap()])
+            .output()
+            .expect("codesign -dv should run");
+        let stderr = String::from_utf8_lossy(&cs_out.stderr);
+        assert!(
+            stderr.contains("Identifier=com.tuyenmai.openkey"),
+            "expected Identifier=com.tuyenmai.openkey, got: {}",
+            stderr
+        );
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 

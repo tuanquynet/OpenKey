@@ -497,6 +497,23 @@ pub fn create_macos_app_bundle(out_dir: &Path) -> Result<PathBuf, String> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundle_str) = app_bundle.to_str() {
+            let _ = std::process::Command::new("codesign")
+                .args([
+                    "--force",
+                    "--deep",
+                    "--identifier",
+                    OPENKEY_BUNDLE,
+                    "--sign",
+                    "-",
+                    bundle_str,
+                ])
+                .output();
+        }
+    }
+
     Ok(app_bundle)
 }
 
