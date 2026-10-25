@@ -11,8 +11,8 @@ use openkey_macos::event_tap::{
 use openkey_macos::handler::MacEventHandler;
 use openkey_macos::sender::RecordingEventSender;
 use crate::ui::{
-    create_macos_app_bundle, on_runtime_status_changed, register_active_runtime,
-    run_cocoa_app_loop, setup_cocoa_status_bar, AppUiController,
+    create_macos_app_bundle, on_runtime_status_changed, open_control_panel_window,
+    register_active_runtime, run_cocoa_app_loop, setup_cocoa_status_bar, AppUiController,
 };
 
 pub fn usage() -> String {
@@ -35,7 +35,7 @@ pub fn usage() -> String {
 }
 
 pub fn run_cli(args: &[String]) -> Result<String, String> {
-    if args.is_empty() || args[0].starts_with("-psn_") {
+    if args.is_empty() || (args[0].starts_with('-') && args[0] != "--help" && args[0] != "-h") {
         return handle_run(args);
     }
     if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
@@ -216,6 +216,7 @@ fn handle_bundle(args: &[String]) -> Result<String, String> {
 
 fn handle_run(args: &[String]) -> Result<String, String> {
     let mut ui = AppUiController::load_from_domain(openkey_macos::config::OPENKEY_BUNDLE);
+    let mut force_show_ui = false;
     let mut i = 0usize;
     while i < args.len() {
         if args[i] == "--config" {
@@ -225,12 +226,15 @@ fn handle_run(args: &[String]) -> Result<String, String> {
                 .load_from_file(path)
                 .map_err(|e| format!("failed to load config {}: {}", path, e))?;
             ui.handler = MacEventHandler::new(ui.config.clone());
+        } else if args[i] == "--show-ui" {
+            force_show_ui = true;
         }
         i += 1;
     }
 
     #[cfg(target_os = "macos")]
     unsafe {
+        let show_ui_on_startup = ui.config.show_ui_on_startup || force_show_ui;
         let status_item = setup_cocoa_status_bar(&ui);
         let mut sender = CoreGraphicsEventSender::new();
         sender.convert_tool_config = ui.handler.engine.convert_tool.clone();
@@ -244,6 +248,9 @@ fn handle_run(args: &[String]) -> Result<String, String> {
         if (*ctx_ptr).start_event_tap().is_err() {
             let _ = prompt_accessibility_permission();
             (*ctx_ptr).start_accessibility_retry_timer();
+            open_control_panel_window();
+        } else if show_ui_on_startup {
+            open_control_panel_window();
         }
         run_cocoa_app_loop();
         (*ctx_ptr).stop_event_tap();

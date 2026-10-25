@@ -1,6 +1,7 @@
 use openkey_app::ui::{
     build_about_window, build_control_panel_window, build_convert_tool_window, build_macro_window,
-    cocoa_window_subview_count, cocoa_window_title, setup_cocoa_status_bar, AppUiController,
+    cocoa_control_panel_active_tab, cocoa_window_content_size, cocoa_window_subview_count,
+    cocoa_window_title, setup_cocoa_status_bar, show_control_panel_tab, AppUiController,
 };
 
 fn main() {
@@ -18,7 +19,15 @@ fn main() {
             cocoa_window_title(cp_win),
             "OpenKey 2.0.5 - Bộ gõ Tiếng Việt"
         );
-        assert!(cocoa_window_subview_count(cp_win) >= 10);
+        assert_eq!(cocoa_window_content_size(cp_win), (560, 490));
+        assert!(cocoa_window_subview_count(cp_win) >= 20);
+
+        // Verify 4 tabs (0: Bộ gõ, 1: Gõ tắt, 2: Hệ thống, 3: Thông tin) switch cleanly
+        assert_eq!(cocoa_control_panel_active_tab(), 0);
+        for tab_idx in [1, 2, 3, 0] {
+            show_control_panel_tab(tab_idx);
+            assert_eq!(cocoa_control_panel_active_tab(), tab_idx);
+        }
 
         let macro_win = build_macro_window(&ui);
         assert!(!macro_win.is_null());

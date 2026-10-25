@@ -1,7 +1,7 @@
 use std::ffi::{c_char, c_void, CString};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
 
 use openkey_macos::config::{MacConfig, OPENKEY_BUNDLE};
 use openkey_macos::event_tap::{quick_convert_pasteboard, EventTapContext};
@@ -679,6 +679,135 @@ impl NSRect {
     }
 }
 
+static ACTIVE_CP_WINDOW: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static ACTIVE_CP_TAB_INDEX: AtomicIsize = AtomicIsize::new(0);
+static ACTIVE_CP_TAB_BOXES: [AtomicPtr<c_void>; 4] = [
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+];
+static ACTIVE_CP_TAB_BUTTONS: [AtomicPtr<c_void>; 4] = [
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+];
+static ACTIVE_CP_RADIO_VIET: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+static ACTIVE_CP_RADIO_ENG: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+pub fn cocoa_control_panel_active_tab() -> usize {
+    ACTIVE_CP_TAB_INDEX.load(Ordering::SeqCst).max(0) as usize
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn show_control_panel_tab(index: usize) {
+    let idx = index.min(3);
+    ACTIVE_CP_TAB_INDEX.store(idx as isize, Ordering::SeqCst);
+    let msg1_bool: unsafe extern "C" fn(*mut c_void, *mut c_void, i8) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    for i in 0..4 {
+        let box_ptr = ACTIVE_CP_TAB_BOXES[i].load(Ordering::SeqCst);
+        if !box_ptr.is_null() {
+            msg1_bool(box_ptr, sel("setHidden:"), if i == idx { 0 } else { 1 });
+        }
+        let btn_ptr = ACTIVE_CP_TAB_BUTTONS[i].load(Ordering::SeqCst);
+        if !btn_ptr.is_null() {
+            msg1_isize(btn_ptr, sel("setState:"), if i == idx { 1 } else { 0 });
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_tab_button_clicked(_this: *mut c_void, _cmd: *mut c_void, sender: *mut c_void) {
+    if sender.is_null() {
+        return;
+    }
+    let get_isize: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+        std::mem::transmute(objc_msgSend as *const ());
+    let tag = get_isize(sender, sel("tag")).max(0) as usize;
+    show_control_panel_tab(tag);
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_popup_input_type_changed(_this: *mut c_void, _cmd: *mut c_void, sender: *mut c_void) {
+    if sender.is_null() {
+        return;
+    }
+    let get_isize: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+        std::mem::transmute(objc_msgSend as *const ());
+    let idx = get_isize(sender, sel("indexOfSelectedItem")) as i32;
+    let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    ui.on_input_type_selected(idx);
+    sync_ui_to_active_runtime(&mut ui);
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_popup_code_changed(_this: *mut c_void, _cmd: *mut c_void, sender: *mut c_void) {
+    if sender.is_null() {
+        return;
+    }
+    let get_isize: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+        std::mem::transmute(objc_msgSend as *const ());
+    let idx = get_isize(sender, sel("indexOfSelectedItem")) as i32;
+    let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    ui.on_code_table_changed(idx);
+    sync_ui_to_active_runtime(&mut ui);
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_radio_language_changed(_this: *mut c_void, _cmd: *mut c_void, sender: *mut c_void) {
+    if sender.is_null() {
+        return;
+    }
+    let get_isize: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let lang = get_isize(sender, sel("tag")) as i32;
+    let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    if ui.handler.engine.config.language != lang {
+        ui.on_input_method_selected();
+        sync_ui_to_active_runtime(&mut ui);
+    }
+    let v_btn = ACTIVE_CP_RADIO_VIET.load(Ordering::SeqCst);
+    let e_btn = ACTIVE_CP_RADIO_ENG.load(Ordering::SeqCst);
+    if !v_btn.is_null() {
+        msg1_isize(v_btn, sel("setState:"), if lang == 1 { 1 } else { 0 });
+    }
+    if !e_btn.is_null() {
+        msg1_isize(e_btn, sel("setState:"), if lang == 0 { 1 } else { 0 });
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_ok_clicked(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    let win = ACTIVE_CP_WINDOW.load(Ordering::SeqCst);
+    if !win.is_null() {
+        let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+        msg0(win, sel("close"));
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_default_config_clicked(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    ui.load_default_config();
+    sync_ui_to_active_runtime(&mut ui);
+    let old_win = ACTIVE_CP_WINDOW.load(Ordering::SeqCst);
+    if !old_win.is_null() {
+        let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+        msg0(old_win, sel("close"));
+    }
+    let new_win = build_control_panel_window(&ui);
+    show_window(new_win);
+}
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" fn objc_on_checkbox_toggled(_this: *mut c_void, _cmd: *mut c_void, sender: *mut c_void) {
     if sender.is_null() {
@@ -714,8 +843,20 @@ unsafe extern "C" fn objc_on_checkbox_toggled(_this: *mut c_void, _cmd: *mut c_v
         22 => ui.set_convert_to_non_caps(state),
         23 => ui.set_convert_to_caps_first_letter(state),
         24 => ui.set_convert_to_caps_each_word(state),
+        25 => ui.set_show_icon_on_dock(state),
+        26 => ui.set_show_ui_on_startup(state),
+        27 => ui.set_perform_layout_compat(state),
+        28 => ui.set_fix_chromium_browser(state),
+        29 => ui.set_send_key_step_by_step(state),
+        30 => ui.set_check_new_version_on_startup(state),
+        101 => ui.set_switch_key_control(state),
+        102 => ui.set_switch_key_option(state),
+        103 => ui.set_switch_key_command(state),
+        104 => ui.set_switch_key_shift(state),
+        105 => ui.set_switch_key_beep(state),
         _ => {}
     }
+    sync_ui_to_active_runtime(&mut ui);
 }
 
 impl AppUiController {
@@ -744,7 +885,8 @@ unsafe fn show_window(win: *mut c_void) {
 #[cfg(target_os = "macos")]
 unsafe extern "C" fn objc_on_control_panel_selected(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
     let ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
-    show_window(build_control_panel_window(&ui));
+    let win = build_control_panel_window(&ui);
+    show_window(win);
 }
 
 #[cfg(target_os = "macos")]
@@ -765,6 +907,29 @@ unsafe extern "C" fn objc_on_about_selected(_this: *mut c_void, _cmd: *mut c_voi
     show_window(build_about_window(&ui));
 }
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_app_should_handle_reopen(
+    _this: *mut c_void,
+    _cmd: *mut c_void,
+    _sender: *mut c_void,
+    _has_visible_windows: i8,
+) -> i8 {
+    open_control_panel_window();
+    1
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn open_control_panel_window() {
+    let ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    let existing = ACTIVE_CP_WINDOW.load(Ordering::SeqCst);
+    if !existing.is_null() {
+        show_window(existing);
+    } else {
+        let win = build_control_panel_window(&ui);
+        show_window(win);
+    }
+}
+
 /// Registers the `OpenKeyRustDelegate` Objective-C class with AppKit menu & window action selectors.
 pub fn register_objc_delegate_class() -> *mut c_void {
     #[cfg(target_os = "macos")]
@@ -780,59 +945,31 @@ pub fn register_objc_delegate_class() -> *mut c_void {
             return cls("OpenKeyRustDelegate");
         }
         let sig = CString::new("v@:@").unwrap();
+        for (sel_name, imp) in [
+            ("onInputMethodSelected:", objc_on_input_method_selected as *const c_void),
+            ("onInputTypeSelected:", objc_on_input_type_selected as *const c_void),
+            ("onCodeSelected:", objc_on_code_selected as *const c_void),
+            ("onQuickConvert:", objc_on_quick_convert as *const c_void),
+            ("onCheckboxToggled:", objc_on_checkbox_toggled as *const c_void),
+            ("onTabButtonClicked:", objc_on_tab_button_clicked as *const c_void),
+            ("onPopupInputTypeChanged:", objc_on_popup_input_type_changed as *const c_void),
+            ("onPopupCodeChanged:", objc_on_popup_code_changed as *const c_void),
+            ("onRadioLanguageChanged:", objc_on_radio_language_changed as *const c_void),
+            ("onOKClicked:", objc_on_ok_clicked as *const c_void),
+            ("onDefaultConfigClicked:", objc_on_default_config_clicked as *const c_void),
+            ("onControlPanelSelected:", objc_on_control_panel_selected as *const c_void),
+            ("onMacroSelected:", objc_on_macro_selected as *const c_void),
+            ("onConvertToolSelected:", objc_on_convert_tool_selected as *const c_void),
+            ("onAboutSelected:", objc_on_about_selected as *const c_void),
+        ] {
+            class_addMethod(new_cls, sel(sel_name), imp, sig.as_ptr());
+        }
+        let reopen_sig = CString::new("c@:@c").unwrap();
         class_addMethod(
             new_cls,
-            sel("onInputMethodSelected:"),
-            objc_on_input_method_selected as *const c_void,
-            sig.as_ptr(),
-        );
-        class_addMethod(
-            new_cls,
-            sel("onInputTypeSelected:"),
-            objc_on_input_type_selected as *const c_void,
-            sig.as_ptr(),
-        );
-        class_addMethod(
-            new_cls,
-            sel("onCodeSelected:"),
-            objc_on_code_selected as *const c_void,
-            sig.as_ptr(),
-        );
-        class_addMethod(
-            new_cls,
-            sel("onQuickConvert:"),
-            objc_on_quick_convert as *const c_void,
-            sig.as_ptr(),
-        );
-        class_addMethod(
-            new_cls,
-            sel("onCheckboxToggled:"),
-            objc_on_checkbox_toggled as *const c_void,
-            sig.as_ptr(),
-        );
-        class_addMethod(
-            new_cls,
-            sel("onControlPanelSelected:"),
-            objc_on_control_panel_selected as *const c_void,
-            sig.as_ptr(),
-        );
-        class_addMethod(
-            new_cls,
-            sel("onMacroSelected:"),
-            objc_on_macro_selected as *const c_void,
-            sig.as_ptr(),
-        );
-        class_addMethod(
-            new_cls,
-            sel("onConvertToolSelected:"),
-            objc_on_convert_tool_selected as *const c_void,
-            sig.as_ptr(),
-        );
-        class_addMethod(
-            new_cls,
-            sel("onAboutSelected:"),
-            objc_on_about_selected as *const c_void,
-            sig.as_ptr(),
+            sel("applicationShouldHandleReopen:hasVisibleWindows:"),
+            objc_app_should_handle_reopen as *const c_void,
+            reopen_sig.as_ptr(),
         );
         objc_registerClassPair(new_cls);
         new_cls
@@ -875,7 +1012,7 @@ unsafe fn create_base_window(title: &str, width: f64, height: f64) -> (*mut c_vo
 }
 
 #[cfg(target_os = "macos")]
-unsafe fn add_label(content_view: *mut c_void, text: &str, rect: NSRect) {
+unsafe fn add_label(content_view: *mut c_void, text: &str, rect: NSRect) -> *mut c_void {
     let msg1_ptr_ret: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
         std::mem::transmute(objc_msgSend as *const ());
     let msg1_rect: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) =
@@ -886,6 +1023,31 @@ unsafe fn add_label(content_view: *mut c_void, text: &str, rect: NSRect) {
     let label = msg1_ptr_ret(cls("NSTextField"), sel("labelWithString:"), nsstring(text));
     msg1_rect(label, sel("setFrame:"), rect);
     msg1_ptr(content_view, sel("addSubview:"), label);
+    label
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_bezel_textfield(content_view: *mut c_void, text: &str, rect: NSRect) -> *mut c_void {
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let init_frame: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_bool: unsafe extern "C" fn(*mut c_void, *mut c_void, i8) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let tf = init_frame(msg0(cls("NSTextField"), sel("alloc")), sel("initWithFrame:"), rect);
+    msg1_ptr(tf, sel("setStringValue:"), nsstring(text));
+    msg1_bool(tf, sel("setBezeled:"), 1);
+    msg1_bool(tf, sel("setDrawsBackground:"), 1);
+    msg1_bool(tf, sel("setEditable:"), 0);
+    msg1_bool(tf, sel("setSelectable:"), 1);
+    msg1_isize(tf, sel("setAlignment:"), 1); // NSTextAlignmentCenter
+    msg1_ptr(content_view, sel("addSubview:"), tf);
+    tf
 }
 
 #[cfg(target_os = "macos")]
@@ -896,7 +1058,7 @@ unsafe fn add_checkbox(
     checked: bool,
     tag: isize,
     rect: NSRect,
-) {
+) -> *mut c_void {
     let msg3_btn: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
         std::mem::transmute(objc_msgSend as *const ());
     let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
@@ -917,62 +1079,349 @@ unsafe fn add_checkbox(
     msg1_isize(btn, sel("setTag:"), tag);
     msg1_rect(btn, sel("setFrame:"), rect);
     msg1_ptr(content_view, sel("addSubview:"), btn);
+    btn
 }
 
-/// Builds the native Cocoa Control Panel (`Bảng điều khiển`) `NSWindow` matching `ViewController.m`.
+#[cfg(target_os = "macos")]
+unsafe fn add_radio_button(
+    content_view: *mut c_void,
+    delegate: *mut c_void,
+    title: &str,
+    selected: bool,
+    tag: isize,
+    rect: NSRect,
+) -> *mut c_void {
+    let msg3_btn: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_rect: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let btn = msg3_btn(
+        cls("NSButton"),
+        sel("radioButtonWithTitle:target:action:"),
+        nsstring(title),
+        delegate,
+        sel("onRadioLanguageChanged:"),
+    );
+    msg1_isize(btn, sel("setState:"), if selected { 1 } else { 0 });
+    msg1_isize(btn, sel("setTag:"), tag);
+    msg1_rect(btn, sel("setFrame:"), rect);
+    msg1_ptr(content_view, sel("addSubview:"), btn);
+    btn
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_popup_button(
+    content_view: *mut c_void,
+    delegate: *mut c_void,
+    items: &[&str],
+    selected_idx: isize,
+    action_sel: *mut c_void,
+    rect: NSRect,
+) -> *mut c_void {
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let init_popup: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect, i8) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let popup = init_popup(
+        msg0(cls("NSPopUpButton"), sel("alloc")),
+        sel("initWithFrame:pullsDown:"),
+        rect,
+        0,
+    );
+    for &item in items {
+        msg1_ptr(popup, sel("addItemWithTitle:"), nsstring(item));
+    }
+    msg1_isize(popup, sel("selectItemAtIndex:"), selected_idx.max(0));
+    msg1_ptr(popup, sel("setTarget:"), delegate);
+    msg1_ptr(popup, sel("setAction:"), action_sel);
+    msg1_ptr(content_view, sel("addSubview:"), popup);
+    popup
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn create_custom_box(parent_view: *mut c_void, rect: NSRect) -> (*mut c_void, *mut c_void) {
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let init_frame: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_f64: unsafe extern "C" fn(*mut c_void, *mut c_void, f64) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let bx = init_frame(msg0(cls("NSBox"), sel("alloc")), sel("initWithFrame:"), rect);
+    msg1_isize(bx, sel("setBoxType:"), 4); // NSBoxCustom
+    msg1_isize(bx, sel("setTitlePosition:"), 0); // NSNoTitle
+    msg1_f64(bx, sel("setCornerRadius:"), 4.0);
+    msg1_f64(bx, sel("setBorderWidth:"), 1.0);
+    let fill_color = msg0(cls("NSColor"), sel("controlBackgroundColor"));
+    if !fill_color.is_null() {
+        msg1_ptr(bx, sel("setFillColor:"), fill_color);
+    }
+    let border_color = msg0(cls("NSColor"), sel("separatorColor"));
+    if !border_color.is_null() {
+        msg1_ptr(bx, sel("setBorderColor:"), border_color);
+    }
+    msg1_ptr(parent_view, sel("addSubview:"), bx);
+    let box_cv = msg0(bx, sel("contentView"));
+    (bx, box_cv)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_bottom_icon_button(
+    content_view: *mut c_void,
+    target: *mut c_void,
+    title: &str,
+    image_name: &str,
+    action_sel: *mut c_void,
+    rect: NSRect,
+) -> *mut c_void {
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let init_frame: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr_ret: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let btn = init_frame(msg0(cls("NSButton"), sel("alloc")), sel("initWithFrame:"), rect);
+    msg1_ptr(btn, sel("setTitle:"), nsstring(title));
+    msg1_isize(btn, sel("setBezelStyle:"), 6); // NSBezelStyleSmallSquare
+    let img = msg1_ptr_ret(cls("NSImage"), sel("imageNamed:"), nsstring(image_name));
+    if !img.is_null() {
+        msg1_ptr(btn, sel("setImage:"), img);
+        msg1_isize(btn, sel("setImagePosition:"), 2); // NSImageLeft
+    }
+    msg1_ptr(btn, sel("setTarget:"), target);
+    msg1_ptr(btn, sel("setAction:"), action_sel);
+    msg1_ptr(content_view, sel("addSubview:"), btn);
+    btn
+}
+
+/// Builds the native Cocoa Control Panel (`Bảng điều khiển`) `NSWindow` matching `Main.storyboard` and `openkey-main-control-2.png`.
 #[cfg(target_os = "macos")]
 pub unsafe fn build_control_panel_window(ui: &AppUiController) -> *mut c_void {
-    let (win, cv, delegate) = create_base_window("OpenKey 2.0.5 - Bộ gõ Tiếng Việt", 520.0, 440.0);
+    let (win, cv, delegate) = create_base_window("OpenKey 2.0.5 - Bộ gõ Tiếng Việt", 560.0, 490.0);
+    ACTIVE_CP_WINDOW.store(win, Ordering::SeqCst);
     let cfg = &ui.handler.engine.config;
 
-    add_label(
+    // 1. Top "Điều khiển" section
+    add_label(cv, "Điều khiển", NSRect::new(36.0, 459.0, 94.0, 17.0));
+    let (_top_box, _top_cv) = create_custom_box(cv, NSRect::new(20.0, 348.0, 520.0, 112.0));
+
+    add_label(cv, "Kiểu gõ:", NSRect::new(38.0, 430.0, 64.0, 17.0));
+    add_popup_button(
         cv,
-        &format!(
-            "Chế độ: {} | Kiểu gõ: {} | Bảng mã: {}",
-            if cfg.language == 1 { "Tiếng Việt" } else { "Tiếng Anh" },
-            match cfg.input_type {
-                1 => "VNI",
-                2 => "Simple Telex 1",
-                3 => "Simple Telex 2",
-                _ => "Telex",
-            },
-            openkey_macos::config::TABLE_CODE_NAMES
-                .get(cfg.code_table as usize)
-                .copied()
-                .unwrap_or("Unicode"),
-        ),
-        NSRect::new(20.0, 400.0, 480.0, 24.0),
+        delegate,
+        &["Telex", "VNI", "Simple Telex 1", "Simple Telex 2"],
+        cfg.input_type as isize,
+        sel("onPopupInputTypeChanged:"),
+        NSRect::new(130.0, 424.0, 129.0, 25.0),
     );
 
-    let checkboxes = [
-        (1, "Đặt dấu oà, uý (thay vì òa, úy)", cfg.use_modern_orthography != 0),
-        (2, "Kiểm tra chính tả", cfg.check_spelling != 0),
-        (3, "Tự khôi phục phím với từ sai", cfg.restore_if_wrong_spelling != 0),
-        (4, "Gõ nhanh (cc=ch, gg=gi, kk=kh, nn=ng, qq=qu, pp=ph, tt=th)", cfg.quick_telex != 0),
-        (5, "Sửa lỗi gợi ý (trình duyệt, Excel...)", cfg.fix_recommend_browser != 0),
-        (6, "Cho phép gõ tắt (Macro)", cfg.use_macro != 0),
-        (7, "Bật gõ tắt cả khi tắt tiếng Việt", cfg.use_macro_in_english_mode != 0),
-        (8, "Tự động viết hoa theo phím gõ tắt", cfg.auto_caps_macro != 0),
-        (9, "Chuyển chế độ thông minh theo ứng dụng", cfg.use_smart_switch_key != 0),
-        (10, "Viết hoa chữ cái đầu câu", cfg.upper_case_first_char != 0),
-        (11, "Cho phép f, z, w, j làm phụ âm đầu", cfg.allow_consonant_zfwj != 0),
-        (12, "Gõ tắt phụ âm đầu (f->ph, j->gi, w->qu)", cfg.quick_start_consonant != 0),
-        (13, "Gõ tắt phụ âm cuối (g->ng, h->nh, k->ch)", cfg.quick_end_consonant != 0),
-        (14, "Tự ghi nhớ bảng mã theo ứng dụng", cfg.remember_code != 0),
-        (15, "Tạm tắt tiếng Việt khi dùng ngôn ngữ khác", cfg.other_language != 0),
-        (18, "Biểu tượng xám trên thanh Menu", ui.config.gray_icon),
-        (19, "Khởi động cùng macOS", ui.config.run_on_startup),
-    ];
+    add_label(cv, "Bảng mã:", NSRect::new(295.0, 429.0, 68.0, 17.0));
+    add_popup_button(
+        cv,
+        delegate,
+        &openkey_macos::config::TABLE_CODE_NAMES,
+        cfg.code_table as isize,
+        sel("onPopupCodeChanged:"),
+        NSRect::new(375.0, 424.0, 128.0, 25.0),
+    );
 
-    for (idx, &(tag, title, checked)) in checkboxes.iter().enumerate() {
-        let col = idx / 9;
-        let row = idx % 9;
-        let x = 20.0 + (col as f64) * 250.0;
-        let y = 360.0 - (row as f64) * 34.0;
-        add_checkbox(cv, delegate, title, checked, tag, NSRect::new(x, y, 240.0, 24.0));
+    add_label(cv, "Phím chuyển:", NSRect::new(38.0, 395.0, 86.0, 17.0));
+    add_checkbox(cv, delegate, "⌃", (cfg.switch_key_status & 0x100) != 0, 101, NSRect::new(130.0, 394.0, 42.0, 18.0));
+    add_checkbox(cv, delegate, "⌥", (cfg.switch_key_status & 0x200) != 0, 102, NSRect::new(185.0, 394.0, 42.0, 18.0));
+    add_checkbox(cv, delegate, "⌘", (cfg.switch_key_status & 0x400) != 0, 103, NSRect::new(240.0, 394.0, 42.0, 18.0));
+    add_checkbox(cv, delegate, "⇧", (cfg.switch_key_status & 0x800) != 0, 104, NSRect::new(295.0, 394.0, 42.0, 18.0));
+
+    let key_char = ((cfg.switch_key_status as u32) >> 24) & 0xFF;
+    let key_code = (cfg.switch_key_status & 0xFF) as u16;
+    let key_text = if key_code == 49 || key_char == 32 || key_char == 49 {
+        "Space".to_string()
+    } else if key_char != 0 && key_char != 0xFE {
+        ((key_char as u8 as char).to_ascii_uppercase()).to_string()
+    } else {
+        "Space".to_string()
+    };
+    add_bezel_textfield(cv, &key_text, NSRect::new(350.0, 390.0, 60.0, 25.0));
+    add_checkbox(cv, delegate, "Kêu beep", (cfg.switch_key_status & 0x8000) != 0, 105, NSRect::new(423.0, 394.0, 86.0, 18.0));
+
+    add_label(cv, "Chế độ gõ:", NSRect::new(38.0, 363.0, 75.0, 17.0));
+    let r_viet = add_radio_button(cv, delegate, "Tiếng Việt", cfg.language == 1, 1, NSRect::new(130.0, 362.0, 95.0, 18.0));
+    let r_eng = add_radio_button(cv, delegate, "English", cfg.language == 0, 0, NSRect::new(295.0, 362.0, 80.0, 18.0));
+    ACTIVE_CP_RADIO_VIET.store(r_viet, Ordering::SeqCst);
+    ACTIVE_CP_RADIO_ENG.store(r_eng, Ordering::SeqCst);
+
+    // 2. Four Tab Content Boxes at (20, 80, 520, 241)
+    let tab_rect = NSRect::new(20.0, 80.0, 520.0, 241.0);
+
+    // Tab 0: Bộ gõ
+    let (box0, cv0) = create_custom_box(cv, tab_rect);
+    add_checkbox(cv0, delegate, "Đặt dấu oà, uý (thay vì òa, úy)", cfg.use_modern_orthography != 0, 1, NSRect::new(18.0, 195.0, 240.0, 18.0));
+    add_checkbox(cv0, delegate, "Sửa lỗi gợi ý (trình duyệt, Excel,...)", cfg.fix_recommend_browser != 0, 5, NSRect::new(18.0, 160.0, 250.0, 18.0));
+    add_checkbox(cv0, delegate, "Viết Hoa chữ cái đầu câu", cfg.upper_case_first_char != 0, 10, NSRect::new(18.0, 125.0, 220.0, 18.0));
+    add_checkbox(cv0, delegate, "Chuyển chế độ thông minh", cfg.use_smart_switch_key != 0, 9, NSRect::new(18.0, 90.0, 220.0, 18.0));
+    add_checkbox(cv0, delegate, "Tự ghi nhớ bảng mã theo ứng dụng", cfg.remember_code != 0, 14, NSRect::new(18.0, 55.0, 250.0, 18.0));
+    add_checkbox(cv0, delegate, "Tắt tiếng Việt khi bộ gõ hệ thống khác tiếng Anh", cfg.other_language != 0, 15, NSRect::new(18.0, 23.0, 340.0, 18.0));
+
+    add_checkbox(cv0, delegate, "Kiểm tra chính tả", cfg.check_spelling != 0, 2, NSRect::new(278.0, 195.0, 160.0, 18.0));
+    add_checkbox(cv0, delegate, "Tự khôi phục phím với từ sai", cfg.restore_if_wrong_spelling != 0, 3, NSRect::new(278.0, 160.0, 210.0, 18.0));
+    add_checkbox(cv0, delegate, "Cho phép \"z w j f\" làm phụ âm", cfg.allow_consonant_zfwj != 0, 11, NSRect::new(278.0, 125.0, 225.0, 18.0));
+    add_checkbox(cv0, delegate, "Tạm tắt chính tả bằng phím ⌃", cfg.temp_off_spelling != 0, 16, NSRect::new(278.0, 90.0, 225.0, 18.0));
+    add_checkbox(cv0, delegate, "Tạm tắt OpenKey bằng phím ⌘", cfg.temp_off_open_key != 0, 17, NSRect::new(278.0, 55.0, 225.0, 18.0));
+
+    // Tab 1: Gõ tắt (matches openkey-main-control-2.png)
+    let (box1, cv1) = create_custom_box(cv, tab_rect);
+    add_checkbox(cv1, delegate, "Cho phép gõ tắt", cfg.use_macro != 0, 6, NSRect::new(18.0, 175.0, 160.0, 18.0));
+    add_checkbox(cv1, delegate, "Gõ tắt cả khi tắt gõ tiếng Việt", cfg.use_macro_in_english_mode != 0, 7, NSRect::new(18.0, 140.0, 215.0, 18.0));
+    add_checkbox(cv1, delegate, "Tự động viết hoa theo phím tắt", cfg.auto_caps_macro != 0, 8, NSRect::new(18.0, 105.0, 225.0, 18.0));
+    {
+        let msg3_btn: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const ());
+        let msg1_rect: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) =
+            std::mem::transmute(objc_msgSend as *const ());
+        let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+        let macro_btn = msg3_btn(
+            cls("NSButton"),
+            sel("buttonWithTitle:target:action:"),
+            nsstring("Bảng gõ tắt..."),
+            delegate,
+            sel("onMacroSelected:"),
+        );
+        msg1_rect(macro_btn, sel("setFrame:"), NSRect::new(14.0, 55.0, 122.0, 32.0));
+        msg1_ptr(cv1, sel("addSubview:"), macro_btn);
+    }
+    add_checkbox(cv1, delegate, "Gõ nhanh (cc=ch, gg=gi, kk=kh, nn=ng,...", cfg.quick_telex != 0, 4, NSRect::new(243.0, 175.0, 267.0, 18.0));
+    add_checkbox(cv1, delegate, "Gõ tắt phụ âm đầu: f→ph, j→gi, w→qu", cfg.quick_start_consonant != 0, 12, NSRect::new(243.0, 140.0, 262.0, 18.0));
+    add_checkbox(cv1, delegate, "Gõ tắt phụ âm cuối: g→ng, h→nh, k→ch", cfg.quick_end_consonant != 0, 13, NSRect::new(243.0, 105.0, 270.0, 18.0));
+
+    // Tab 2: Hệ thống
+    let (box2, cv2) = create_custom_box(cv, tab_rect);
+    add_checkbox(cv2, delegate, "Hiện biểu tượng trên thanh Dock", ui.config.show_on_dock, 25, NSRect::new(18.0, 175.0, 235.0, 18.0));
+    add_checkbox(cv2, delegate, "Bật bảng này khi khởi động", ui.config.show_ui_on_startup, 26, NSRect::new(18.0, 140.0, 210.0, 18.0));
+    add_checkbox(cv2, delegate, "Biểu tượng hiện đại trên thanh menu", ui.config.gray_icon, 18, NSRect::new(18.0, 105.0, 255.0, 18.0));
+    add_checkbox(cv2, delegate, "Khởi động cùng macOS", ui.config.run_on_startup, 19, NSRect::new(18.0, 70.0, 185.0, 18.0));
+    add_checkbox(cv2, delegate, "Tương thích Telex trên các Layout khác (Dvorak, Coleman, ...)", ui.config.perform_layout_compat, 27, NSRect::new(18.0, 35.0, 410.0, 18.0));
+    add_checkbox(cv2, delegate, "Sửa lỗi trên Chromium (beta)", ui.config.fix_chromium_browser, 28, NSRect::new(283.0, 175.0, 224.0, 18.0));
+    add_checkbox(cv2, delegate, "Gửi từng phím (bật nếu bị lỗi)", ui.config.send_key_step_by_step, 29, NSRect::new(283.0, 140.0, 215.0, 18.0));
+    add_checkbox(cv2, delegate, "Kiểm tra bản mới lúc khởi động", !ui.config.dont_check_update, 30, NSRect::new(283.0, 105.0, 230.0, 18.0));
+
+    // Tab 3: Thông tin
+    let (box3, cv3) = create_custom_box(cv, tab_rect);
+    add_label(cv3, "OpenKey - Bộ gõ Tiếng Việt nguồn mở đa nền tảng", NSRect::new(78.0, 185.0, 394.0, 20.0));
+    add_label(cv3, "Trang chủ: https://open-key.org", NSRect::new(78.0, 155.0, 340.0, 17.0));
+    add_label(cv3, "Facebook: https://www.facebook.com/OpenKeyVN", NSRect::new(78.0, 132.0, 360.0, 17.0));
+    add_label(cv3, "Phiên bản 2.0.5 (build 62) - Rust macOS Port", NSRect::new(78.0, 102.0, 418.0, 18.0));
+    add_label(
+        cv3,
+        "OpenKey cho macOS là phần mềm mã nguồn mở và được phát hành miễn phí.",
+        NSRect::new(78.0, 58.0, 422.0, 36.0),
+    );
+    add_label(cv3, "Mai Vũ Tuyên © 2019 - maivutuyen.91@gmail.com", NSRect::new(78.0, 22.0, 340.0, 17.0));
+
+    ACTIVE_CP_TAB_BOXES[0].store(box0, Ordering::SeqCst);
+    ACTIVE_CP_TAB_BOXES[1].store(box1, Ordering::SeqCst);
+    ACTIVE_CP_TAB_BOXES[2].store(box2, Ordering::SeqCst);
+    ACTIVE_CP_TAB_BOXES[3].store(box3, Ordering::SeqCst);
+
+    // 3. Four Tab Header Buttons at y = 303.0
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let init_frame: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_isize: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    for (idx, (title, x)) in [
+        ("Bộ gõ", 56.0),
+        ("Gõ tắt", 165.0),
+        ("Hệ thống", 274.0),
+        ("Thông tin", 383.0),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let btn = init_frame(
+            msg0(cls("NSButton"), sel("alloc")),
+            sel("initWithFrame:"),
+            NSRect::new(*x, 303.0, 122.0, 32.0),
+        );
+        msg1_ptr(btn, sel("setTitle:"), nsstring(title));
+        msg1_isize(btn, sel("setBezelStyle:"), 1); // NSBezelStyleRounded
+        msg1_isize(btn, sel("setButtonType:"), 2); // NSButtonTypePushOnPushOff
+        msg1_isize(btn, sel("setTag:"), idx as isize);
+        msg1_ptr(btn, sel("setTarget:"), delegate);
+        msg1_ptr(btn, sel("setAction:"), sel("onTabButtonClicked:"));
+        msg1_ptr(cv, sel("addSubview:"), btn);
+        ACTIVE_CP_TAB_BUTTONS[idx].store(btn, Ordering::SeqCst);
     }
 
+    show_control_panel_tab(0);
+
+    // 4. Three Bottom Action Buttons (Kết thúc, Mặc định, OK)
+    let app = msg0(cls("NSApplication"), sel("sharedApplication"));
+    add_bottom_icon_button(
+        cv,
+        app,
+        "Kết thúc",
+        "ExitButton",
+        sel("terminate:"),
+        NSRect::new(57.0, 20.0, 120.0, 41.0),
+    );
+    add_bottom_icon_button(
+        cv,
+        delegate,
+        "Mặc định",
+        "ThumbUp",
+        sel("onDefaultConfigClicked:"),
+        NSRect::new(220.0, 20.0, 120.0, 41.0),
+    );
+    add_bottom_icon_button(
+        cv,
+        delegate,
+        "OK",
+        "OK",
+        sel("onOKClicked:"),
+        NSRect::new(382.0, 19.0, 120.0, 42.0),
+    );
+
     win
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn cocoa_window_content_size(win: *mut c_void) -> (usize, usize) {
+    if win.is_null() {
+        return (0, 0);
+    }
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_frame: unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSRect =
+        std::mem::transmute(objc_msgSend as *const ());
+    let cv = msg0(win, sel("contentView"));
+    if cv.is_null() {
+        return (0, 0);
+    }
+    let frame = msg_frame(cv, sel("frame"));
+    (frame.size.width.round() as usize, frame.size.height.round() as usize)
 }
 
 /// Builds the native Cocoa Macro Editor (`Bảng gõ tắt`) `NSWindow` matching `MacroViewController.mm`.
@@ -1269,6 +1718,11 @@ pub unsafe fn setup_cocoa_status_bar(ui: &AppUiController) -> *mut c_void {
     let policy: isize = if ui.config.show_on_dock { 0 } else { 1 };
     set_policy(app, sel("setActivationPolicy:"), policy);
 
+    let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let delegate_cls = register_objc_delegate_class();
+    let app_delegate = msg0(msg0(delegate_cls, sel("alloc")), sel("init"));
+    msg1_ptr(app, sel("setDelegate:"), app_delegate);
     let status_bar = msg0(cls("NSStatusBar"), sel("systemStatusBar"));
     let status_item = msg1_f64(status_bar, sel("statusItemWithLength:"), -1.0);
     populate_status_item(status_item, ui);
