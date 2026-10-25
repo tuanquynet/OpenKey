@@ -7,7 +7,10 @@ use openkey_macos::config::{MacConfig, TABLE_CODE_NAMES};
 use openkey_macos::event_tap::{is_accessibility_trusted, CoreGraphicsEventSender, EventTapContext};
 use openkey_macos::handler::MacEventHandler;
 use openkey_macos::sender::RecordingEventSender;
-use crate::ui::{create_macos_app_bundle, setup_cocoa_status_bar, AppUiController};
+use crate::ui::{
+    create_macos_app_bundle, on_runtime_status_changed, register_active_runtime,
+    run_cocoa_app_loop, setup_cocoa_status_bar, AppUiController,
+};
 
 pub fn usage() -> String {
     [
@@ -29,7 +32,10 @@ pub fn usage() -> String {
 }
 
 pub fn run_cli(args: &[String]) -> Result<String, String> {
-    if args.is_empty() || args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
+    if args.is_empty() || args[0].starts_with("-psn_") {
+        return handle_run(args);
+    }
+    if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
         return Ok(usage());
     }
 
@@ -222,17 +228,19 @@ fn handle_run(args: &[String]) -> Result<String, String> {
 
     #[cfg(target_os = "macos")]
     unsafe {
-        let _status_item = setup_cocoa_status_bar(&ui);
+        let status_item = setup_cocoa_status_bar(&ui);
         let mut sender = CoreGraphicsEventSender::new();
         sender.convert_tool_config = ui.handler.engine.convert_tool.clone();
-        let mut ctx = Box::new(EventTapContext {
+        sender.on_status_changed = Some(on_runtime_status_changed);
+        let ctx_ptr = Box::into_raw(Box::new(EventTapContext {
             handler: ui.handler,
             sender,
             run_loop_source: std::ptr::null_mut(),
-        });
-        ctx.start_event_tap()?;
-        ctx.run_loop();
-        ctx.stop_event_tap();
+        }));
+        register_active_runtime(ctx_ptr, status_item);
+        let _ = (*ctx_ptr).start_event_tap();
+        run_cocoa_app_loop();
+        (*ctx_ptr).stop_event_tap();
     }
     Ok(String::new())
 }

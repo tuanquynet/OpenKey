@@ -380,6 +380,7 @@ pub struct CoreGraphicsEventSender {
     pub backspace_down: CGEventRef,
     pub backspace_up: CGEventRef,
     pub convert_tool_config: ConvertToolConfig,
+    pub on_status_changed: Option<fn(i32, i32)>,
 }
 
 impl CoreGraphicsEventSender {
@@ -395,6 +396,7 @@ impl CoreGraphicsEventSender {
             backspace_down,
             backspace_up,
             convert_tool_config: ConvertToolConfig::default(),
+            on_status_changed: None,
         }
     }
 }
@@ -476,8 +478,16 @@ impl EventSender for CoreGraphicsEventSender {
         let _ = quick_convert_pasteboard(&self.convert_tool_config);
     }
 
-    fn on_input_method_changed(&mut self, _language: i32, _will_notify: bool) {}
-    fn on_code_table_changed(&mut self, _code_table: i32) {}
+    fn on_input_method_changed(&mut self, language: i32, _will_notify: bool) {
+        if let Some(cb) = self.on_status_changed {
+            cb(language, -1);
+        }
+    }
+    fn on_code_table_changed(&mut self, code_table: i32) {
+        if let Some(cb) = self.on_status_changed {
+            cb(-1, code_table);
+        }
+    }
 }
 
 pub struct EventTapContext {

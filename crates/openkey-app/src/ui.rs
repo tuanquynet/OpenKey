@@ -1,9 +1,10 @@
 use std::ffi::{c_char, c_void, CString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 use openkey_macos::config::{MacConfig, OPENKEY_BUNDLE};
-use openkey_macos::event_tap::quick_convert_pasteboard;
+use openkey_macos::event_tap::{quick_convert_pasteboard, EventTapContext};
 use openkey_macos::handler::MacEventHandler;
 use openkey_macos::hotkeys::format_quick_convert_menu_title;
 
@@ -426,8 +427,12 @@ pub fn create_macos_app_bundle(out_dir: &Path) -> Result<PathBuf, String> {
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>OpenKey</string>
     <key>CFBundleExecutable</key>
     <string>OpenKey</string>
+    <key>CFBundleIconFile</key>
+    <string>Icon</string>
     <key>CFBundleIdentifier</key>
     <string>com.tuyenmai.openkey</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -440,22 +445,43 @@ pub fn create_macos_app_bundle(out_dir: &Path) -> Result<PathBuf, String> {
     <string>2.0.5</string>
     <key>CFBundleVersion</key>
     <string>62</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>
     <string>10.13</string>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
     <key>LSUIElement</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2019-2026 Tuyen Mai. All rights reserved.</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
 </dict>
 </plist>
 "#;
     fs::write(contents.join("Info.plist"), info_plist)
         .map_err(|e| format!("failed to write Info.plist: {}", e))?;
+    let _ = fs::write(contents.join("PkgInfo"), b"APPL????");
 
     if let Ok(exe) = std::env::current_exe() {
-        let _ = fs::copy(&exe, macos_dir.join("OpenKey"));
+        let sibling_bin = exe
+            .parent()
+            .map(|p| p.join("openkey"))
+            .filter(|p| p.exists())
+            .unwrap_or(exe);
+        let dst_bin = macos_dir.join("OpenKey");
+        let _ = fs::copy(&sibling_bin, &dst_bin);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = fs::metadata(&dst_bin) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o755);
+                let _ = fs::set_permissions(&dst_bin, perms);
+            }
+        }
     }
-
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let src_resources = repo_root.join("Sources/OpenKey/macOS/ModernKey/Resources");
     if src_resources.exists() {
@@ -515,10 +541,66 @@ unsafe fn nsstring(s: &str) -> *mut c_void {
     f(cls("NSString"), sel("stringWithUTF8String:"), c.as_ptr())
 }
 
+static ACTIVE_EVENT_TAP_CTX: AtomicPtr<EventTapContext> = AtomicPtr::new(std::ptr::null_mut());
+static ACTIVE_STATUS_ITEM: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+pub fn register_active_runtime(ctx: *mut EventTapContext, status_item: *mut c_void) {
+    ACTIVE_EVENT_TAP_CTX.store(ctx, Ordering::SeqCst);
+    ACTIVE_STATUS_ITEM.store(status_item, Ordering::SeqCst);
+}
+
+pub fn on_runtime_status_changed(language: i32, code_table: i32) {
+    let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
+    if language >= 0 {
+        ui.handler.engine.config.language = language;
+    }
+    if code_table >= 0 {
+        ui.handler.engine.config.code_table = code_table;
+    }
+    let ctx_ptr = ACTIVE_EVENT_TAP_CTX.load(Ordering::SeqCst);
+    if !ctx_ptr.is_null() {
+        unsafe {
+            let ctx = &mut *ctx_ptr;
+            ui.handler.engine.smart_switch = ctx.handler.engine.smart_switch.clone();
+            ui.handler.engine.macros = ctx.handler.engine.macros.clone();
+        }
+    }
+    ui.save_preferences();
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let status_item = ACTIVE_STATUS_ITEM.load(Ordering::SeqCst);
+        if !status_item.is_null() {
+            populate_status_item(status_item, &ui);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn sync_ui_to_active_runtime(ui: &mut AppUiController) {
+    let ctx_ptr = ACTIVE_EVENT_TAP_CTX.load(Ordering::SeqCst);
+    if !ctx_ptr.is_null() {
+        let ctx = &mut *ctx_ptr;
+        ctx.handler.engine.config = ui.handler.engine.config.clone();
+        ctx.handler.engine.convert_tool = ui.handler.engine.convert_tool.clone();
+        ctx.handler.send_key_step_by_step = ui.handler.send_key_step_by_step;
+        ctx.handler.fix_chromium_browser = ui.handler.fix_chromium_browser;
+        ctx.handler.perform_layout_compat = ui.handler.perform_layout_compat;
+        ctx.sender.convert_tool_config = ui.handler.engine.convert_tool.clone();
+        if ctx.sender.event_tap.is_null() {
+            let _ = ctx.start_event_tap();
+        }
+    }
+    let status_item = ACTIVE_STATUS_ITEM.load(Ordering::SeqCst);
+    if !status_item.is_null() {
+        populate_status_item(status_item, ui);
+    }
+}
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" fn objc_on_input_method_selected(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
     let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
     ui.on_input_method_selected();
+    sync_ui_to_active_runtime(&mut ui);
 }
 
 #[cfg(target_os = "macos")]
@@ -529,6 +611,7 @@ unsafe extern "C" fn objc_on_input_type_selected(_this: *mut c_void, _cmd: *mut 
         let tag = get_tag(sender, sel("tag")) as i32;
         let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
         ui.on_input_type_selected(tag);
+        sync_ui_to_active_runtime(&mut ui);
     }
 }
 
@@ -540,9 +623,9 @@ unsafe extern "C" fn objc_on_code_selected(_this: *mut c_void, _cmd: *mut c_void
         let tag = get_tag(sender, sel("tag")) as i32;
         let mut ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
         ui.on_code_table_changed(tag);
+        sync_ui_to_active_runtime(&mut ui);
     }
 }
-
 #[cfg(target_os = "macos")]
 unsafe extern "C" fn objc_on_quick_convert(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
     let ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
@@ -1001,10 +1084,8 @@ pub unsafe fn cocoa_window_subview_count(win: *mut c_void) -> usize {
 
 /// Initializes the native Cocoa `NSStatusBar` status item and menu matching `createStatusBarMenu` in `AppDelegate.m`.
 #[cfg(target_os = "macos")]
-pub unsafe fn setup_cocoa_status_bar(ui: &AppUiController) -> *mut c_void {
+pub unsafe fn populate_status_item(status_item: *mut c_void, ui: &AppUiController) {
     let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
-        std::mem::transmute(objc_msgSend as *const ());
-    let msg1_f64: unsafe extern "C" fn(*mut c_void, *mut c_void, f64) -> *mut c_void =
         std::mem::transmute(objc_msgSend as *const ());
     let msg1_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
         std::mem::transmute(objc_msgSend as *const ());
@@ -1022,22 +1103,19 @@ pub unsafe fn setup_cocoa_status_bar(ui: &AppUiController) -> *mut c_void {
 
     let delegate_cls = register_objc_delegate_class();
     let delegate_target = msg0(msg0(delegate_cls, sel("alloc")), sel("init"));
-
-    let app = msg0(cls("NSApplication"), sel("sharedApplication"));
-    let policy: isize = if ui.config.show_on_dock { 0 } else { 1 };
-    let set_policy: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) -> i8 =
-        std::mem::transmute(objc_msgSend as *const ());
-    set_policy(app, sel("setActivationPolicy:"), policy);
-
-    let status_bar = msg0(cls("NSStatusBar"), sel("systemStatusBar"));
-    let status_item = msg1_f64(status_bar, sel("statusItemWithLength:"), -1.0);
     let snap = ui.menu_snapshot();
 
     let button = msg0(status_item, sel("button"));
     if !button.is_null() {
-        msg1_ptr(button, sel("setTitle:"), nsstring(snap.status_title));
+        let img = msg1_ptr(cls("NSImage"), sel("imageNamed:"), nsstring(snap.status_icon_name));
+        if !img.is_null() {
+            msg1_bool(img, sel("setTemplate:"), if snap.is_template_icon { 1 } else { 0 });
+            msg1_ptr(button, sel("setImage:"), img);
+            msg1_ptr(button, sel("setTitle:"), nsstring(""));
+        } else {
+            msg1_ptr(button, sel("setTitle:"), nsstring(snap.status_title));
+        }
     }
-
     let menu_alloc = msg0(cls("NSMenu"), sel("alloc"));
     let menu = msg1_ptr(menu_alloc, sel("initWithTitle:"), nsstring("OpenKey"));
     msg1_bool(menu, sel("setAutoenablesItems:"), 0);
@@ -1158,5 +1236,32 @@ pub unsafe fn setup_cocoa_status_bar(ui: &AppUiController) -> *mut c_void {
     );
 
     msg1_ptr(status_item, sel("setMenu:"), menu);
+}
+
+/// Initializes the native Cocoa `NSStatusBar` status item and menu matching `createStatusBarMenu` in `AppDelegate.m`.
+#[cfg(target_os = "macos")]
+pub unsafe fn setup_cocoa_status_bar(ui: &AppUiController) -> *mut c_void {
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_f64: unsafe extern "C" fn(*mut c_void, *mut c_void, f64) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let set_policy: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) -> i8 =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let app = msg0(cls("NSApplication"), sel("sharedApplication"));
+    let policy: isize = if ui.config.show_on_dock { 0 } else { 1 };
+    set_policy(app, sel("setActivationPolicy:"), policy);
+
+    let status_bar = msg0(cls("NSStatusBar"), sel("systemStatusBar"));
+    let status_item = msg1_f64(status_bar, sel("statusItemWithLength:"), -1.0);
+    populate_status_item(status_item, ui);
     status_item
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn run_cocoa_app_loop() {
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let app = msg0(cls("NSApplication"), sel("sharedApplication"));
+    msg0(app, sel("run"));
 }
