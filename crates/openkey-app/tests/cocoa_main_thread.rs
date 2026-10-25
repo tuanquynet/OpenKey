@@ -1,8 +1,9 @@
 use openkey_app::ui::{
     build_about_window, build_control_panel_window, build_convert_tool_window, build_macro_window,
     cocoa_control_panel_active_tab, cocoa_control_panel_tab_is_highlighted,
-    cocoa_window_content_size, cocoa_window_subview_count, cocoa_window_title,
-    setup_cocoa_status_bar, show_control_panel_tab, AppUiController,
+    cocoa_control_panel_tab_text_padding_diff, cocoa_window_content_size,
+    cocoa_window_subview_count, cocoa_window_title, setup_cocoa_status_bar,
+    show_control_panel_tab, AppUiController,
 };
 
 fn main() {
@@ -27,6 +28,13 @@ fn main() {
         assert_eq!(cocoa_control_panel_active_tab(), 0);
         assert!(cocoa_control_panel_tab_is_highlighted(0));
         assert!(!cocoa_control_panel_tab_is_highlighted(1));
+        let (v_diff, h_diff) = cocoa_control_panel_tab_text_padding_diff(0);
+        assert!(
+            v_diff <= 3 && h_diff <= 3,
+            "expected centered tab text (v_diff <= 3, h_diff <= 3), got v_diff={}, h_diff={}",
+            v_diff,
+            h_diff
+        );
         for tab_idx in [1, 2, 3, 0] {
             show_control_panel_tab(tab_idx);
             assert_eq!(cocoa_control_panel_active_tab(), tab_idx);

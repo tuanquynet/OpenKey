@@ -845,6 +845,95 @@ pub unsafe fn cocoa_control_panel_tab_is_highlighted(tab_idx: usize) -> bool {
     b > r + 0.30
 }
 
+/// Returns `(vertical_padding_diff, horizontal_padding_diff)` in physical pixels for the rendered text inside `tab_idx`.
+#[cfg(target_os = "macos")]
+pub unsafe fn cocoa_control_panel_tab_text_padding_diff(tab_idx: usize) -> (usize, usize) {
+    if tab_idx >= 4 {
+        return (999, 999);
+    }
+    let pill = ACTIVE_CP_TAB_PILLS[tab_idx].load(Ordering::SeqCst);
+    if pill.is_null() {
+        return (999, 999);
+    }
+    let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_isize: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_bounds: unsafe extern "C" fn(*mut c_void, *mut c_void) -> NSRect =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_rep: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_cache: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect, *mut c_void) =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_color_at: unsafe extern "C" fn(*mut c_void, *mut c_void, isize, isize) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg1_ptr_ret: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    let msg_comp: unsafe extern "C" fn(*mut c_void, *mut c_void) -> f64 =
+        std::mem::transmute(objc_msgSend as *const ());
+
+    let win = ACTIVE_CP_WINDOW.load(Ordering::SeqCst);
+    if !win.is_null() {
+        let msg_void: unsafe extern "C" fn(*mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+        msg_void(win, sel("displayIfNeeded"));
+    }
+    let bounds = msg_bounds(pill, sel("bounds"));
+    let rep = msg_rep(pill, sel("bitmapImageRepForCachingDisplayInRect:"), bounds);
+    if rep.is_null() {
+        return (999, 999);
+    }
+    msg_cache(pill, sel("cacheDisplayInRect:toBitmapImageRep:"), bounds, rep);
+    let w = msg_isize(rep, sel("pixelsWide"));
+    let h = msg_isize(rep, sel("pixelsHigh"));
+    let srgb = msg0(cls("NSColorSpace"), sel("sRGBColorSpace"));
+    let bg_raw = msg_color_at(rep, sel("colorAtX:y:"), 20, h / 2);
+    let bg = msg1_ptr_ret(bg_raw, sel("colorUsingColorSpace:"), srgb);
+    let bg_r = msg_comp(bg, sel("redComponent"));
+    let bg_g = msg_comp(bg, sel("greenComponent"));
+    let bg_b = msg_comp(bg, sel("blueComponent"));
+
+    let mut min_y = h;
+    let mut max_y = 0isize;
+    let mut min_x = w;
+    let mut max_x = 0isize;
+    for y in 4..(h - 4) {
+        for x in 20..(w - 20) {
+            let c_raw = msg_color_at(rep, sel("colorAtX:y:"), x, y);
+            if !c_raw.is_null() {
+                let c = msg1_ptr_ret(c_raw, sel("colorUsingColorSpace:"), srgb);
+                if !c.is_null() {
+                    let diff = (msg_comp(c, sel("redComponent")) - bg_r).abs()
+                        + (msg_comp(c, sel("greenComponent")) - bg_g).abs()
+                        + (msg_comp(c, sel("blueComponent")) - bg_b).abs();
+                    if diff > 0.35 {
+                        if y < min_y {
+                            min_y = y;
+                        }
+                        if y > max_y {
+                            max_y = y;
+                        }
+                        if x < min_x {
+                            min_x = x;
+                        }
+                        if x > max_x {
+                            max_x = x;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let top_pad = min_y;
+    let bottom_pad = h - 1 - max_y;
+    let left_pad = min_x;
+    let right_pad = w - 1 - max_x;
+    (
+        (top_pad - bottom_pad).unsigned_abs(),
+        (left_pad - right_pad).unsigned_abs(),
+    )
+}
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" fn objc_on_tab_button_clicked(_this: *mut c_void, _cmd: *mut c_void, sender: *mut c_void) {
     if sender.is_null() {
@@ -1478,6 +1567,8 @@ pub unsafe fn build_control_panel_window(ui: &AppUiController) -> *mut c_void {
         std::mem::transmute(objc_msgSend as *const ());
     let msg1_f64: unsafe extern "C" fn(*mut c_void, *mut c_void, f64) =
         std::mem::transmute(objc_msgSend as *const ());
+    let msg1_size: unsafe extern "C" fn(*mut c_void, *mut c_void, NSSize) =
+        std::mem::transmute(objc_msgSend as *const ());
 
     for (idx, x) in [62.0, 171.0, 280.0, 389.0].iter().enumerate() {
         let pill = init_frame(
@@ -1489,13 +1580,21 @@ pub unsafe fn build_control_panel_window(ui: &AppUiController) -> *mut c_void {
         msg1_isize(pill, sel("setTitlePosition:"), 0); // NSNoTitle
         msg1_f64(pill, sel("setCornerRadius:"), 5.0);
         msg1_f64(pill, sel("setBorderWidth:"), 1.0);
+        msg1_size(
+            pill,
+            sel("setContentViewMargins:"),
+            NSSize {
+                width: 0.0,
+                height: 0.0,
+            },
+        );
         msg1_ptr(cv, sel("addSubview:"), pill);
         let pill_cv = msg0(pill, sel("contentView"));
 
         let btn = init_frame(
             msg0(cls("NSButton"), sel("alloc")),
             sel("initWithFrame:"),
-            NSRect::new(0.0, 0.0, 107.0, 22.0),
+            NSRect::new(0.0, 1.0, 107.0, 22.0),
         );
         msg1_bool(btn, sel("setBordered:"), 0);
         msg1_isize(btn, sel("setButtonType:"), 0); // NSButtonTypeMomentaryLight
