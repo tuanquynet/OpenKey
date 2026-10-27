@@ -1,8 +1,11 @@
 use openkey_app::ui::{
     build_about_window, build_control_panel_window, build_convert_tool_window, build_macro_window,
     cocoa_control_panel_active_tab, cocoa_control_panel_tab_is_highlighted,
-    cocoa_control_panel_tab_text_padding_diff, cocoa_window_content_size,
-    cocoa_window_subview_count, cocoa_window_title, setup_cocoa_status_bar,
+    cocoa_control_panel_tab_text_padding_diff, cocoa_macro_add_button_title,
+    cocoa_macro_cell_text, cocoa_macro_field_values, cocoa_macro_row_count,
+    cocoa_macro_select_row, cocoa_macro_set_fields, cocoa_window_content_size,
+    cocoa_window_subview_count, cocoa_window_title, macro_add_action, macro_delete_action,
+    macro_export_to_path, macro_import_from_path, setup_cocoa_status_bar,
     show_control_panel_tab, AppUiController,
 };
 
@@ -10,6 +13,7 @@ fn main() {
     let mut ui = AppUiController::with_domain("com.tuyenmai.openkey.rust_window_test");
     ui.load_default_config();
     ui.handler.engine.macros.add_macro("vn", "Việt Nam", 0);
+    ui.save_preferences();
 
     unsafe {
         let status_item = setup_cocoa_status_bar(&ui);
@@ -52,7 +56,105 @@ fn main() {
         let macro_win = build_macro_window(&ui);
         assert!(!macro_win.is_null());
         assert_eq!(cocoa_window_title(macro_win), "Bảng gõ tắt - OpenKey");
-        assert!(cocoa_window_subview_count(macro_win) >= 4);
+        assert_eq!(cocoa_window_content_size(macro_win), (600, 472));
+        // Subviews: 2 labels + 2 textfields + 2 icon buttons + 1 scrollview + 2 push buttons + 1 checkbox = 10
+        assert!(cocoa_window_subview_count(macro_win) >= 10);
+
+        // 1. Initial state: "vn" was preloaded
+        assert_eq!(cocoa_macro_row_count(), 1);
+        assert_eq!(cocoa_macro_cell_text(0, 0), "vn");
+        assert_eq!(cocoa_macro_cell_text(0, 1), "Việt Nam");
+        assert_eq!(cocoa_macro_add_button_title(), "Thêm");
+
+        // 2. Typing existing key switches button to "Sửa", new key switches to "Thêm"
+        cocoa_macro_set_fields("vn", "Việt Nam!");
+        assert_eq!(cocoa_macro_add_button_title(), "Sửa");
+        cocoa_macro_set_fields("ok", "Đồng ý");
+        assert_eq!(cocoa_macro_add_button_title(), "Thêm");
+
+        // 3. Trigger Add via macro_add_action()
+        macro_add_action().expect("add 'ok' should succeed");
+        assert_eq!(cocoa_macro_row_count(), 2);
+        // Inputs are cleared after addition, button title reset to "Thêm"
+        assert_eq!(cocoa_macro_field_values(), (String::new(), String::new()));
+        assert_eq!(cocoa_macro_add_button_title(), "Thêm");
+        // Rows sorted by MacroStore keycode key ("vn" [9, 45] < "ok" [31, 40])
+        assert_eq!(cocoa_macro_cell_text(0, 0), "vn");
+        assert_eq!(cocoa_macro_cell_text(0, 1), "Việt Nam");
+        assert_eq!(cocoa_macro_cell_text(1, 0), "ok");
+        assert_eq!(cocoa_macro_cell_text(1, 1), "Đồng ý");
+
+        // 4. Selecting row 0 ("vn") populates inputs and sets button to "Sửa"
+        cocoa_macro_select_row(0);
+        assert_eq!(
+            cocoa_macro_field_values(),
+            ("vn".to_string(), "Việt Nam".to_string())
+        );
+        assert_eq!(cocoa_macro_add_button_title(), "Sửa");
+
+        // 5. Updating an existing entry in-place
+        cocoa_macro_set_fields("vn", "Cộng hòa Xã hội Chủ nghĩa Việt Nam");
+        macro_add_action().expect("update 'vn' should succeed");
+        assert_eq!(cocoa_macro_row_count(), 2);
+        assert_eq!(
+            cocoa_macro_cell_text(0, 1),
+            "Cộng hòa Xã hội Chủ nghĩa Việt Nam"
+        );
+
+        // 6. Delete macro: selecting "ok" (row 1) and triggering delete
+        cocoa_macro_select_row(1);
+        assert_eq!(cocoa_macro_field_values().0, "ok");
+        macro_delete_action().expect("delete 'ok' should succeed");
+        assert_eq!(cocoa_macro_row_count(), 1);
+        assert_eq!(cocoa_macro_cell_text(0, 0), "vn");
+        assert_eq!(cocoa_macro_field_values(), (String::new(), String::new()));
+
+        // 7. Validation: empty name/content rejected
+        cocoa_macro_set_fields("", "Không có phím");
+        assert_eq!(
+            macro_add_action().unwrap_err(),
+            "Bạn hãy nhập từ cần gõ tắt!"
+        );
+        cocoa_macro_set_fields("test", "");
+        assert_eq!(
+            macro_add_action().unwrap_err(),
+            "Bạn hãy nhập từ cần gõ tắt!"
+        );
+        cocoa_macro_set_fields("", "");
+        assert_eq!(
+            macro_delete_action().unwrap_err(),
+            "Bạn hãy chọn từ cần xoá!"
+        );
+
+        // 8. File Export & Import roundtrip via engine-compatible file format
+        let tmp_file = std::env::temp_dir().join(format!(
+            "openkey_macro_test_{}.txt",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        ));
+        // Export single "vn" macro
+        macro_export_to_path(&tmp_file).expect("export should succeed");
+        let exported_content = std::fs::read_to_string(&tmp_file).unwrap();
+        assert!(exported_content.contains("vn:Cộng hòa Xã hội Chủ nghĩa Việt Nam"));
+
+        // Add extra item, then import with keep_existing = false to restore
+        cocoa_macro_set_fields("temp", "Tạm thời");
+        macro_add_action().unwrap();
+        assert_eq!(cocoa_macro_row_count(), 2);
+
+        macro_import_from_path(&tmp_file, false).expect("import should succeed");
+        assert_eq!(cocoa_macro_row_count(), 1);
+        assert_eq!(cocoa_macro_cell_text(0, 0), "vn");
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(tmp_file);
+
+        // 9. Verify persistence back into AppUiController reload
+        let reloaded = AppUiController::load_from_domain("com.tuyenmai.openkey.rust_window_test");
+        assert_eq!(reloaded.macro_entries().len(), 1);
+        assert_eq!(reloaded.macro_entries()[0].0, "vn");
 
         let convert_win = build_convert_tool_window(&ui);
         assert!(!convert_win.is_null());

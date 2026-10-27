@@ -2,6 +2,8 @@ use std::ffi::{c_char, c_void, CString};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, AtomicPtr, Ordering};
+#[cfg(target_os = "macos")]
+use std::sync::{Mutex, MutexGuard};
 
 use openkey_macos::config::{MacConfig, OPENKEY_BUNDLE};
 use openkey_macos::event_tap::{quick_convert_pasteboard, EventTapContext};
@@ -271,6 +273,61 @@ impl AppUiController {
     pub fn set_auto_caps_macro(&mut self, enabled: bool) {
         self.handler.engine.config.auto_caps_macro = if enabled { 1 } else { 0 };
         self.save_preferences();
+    }
+
+    // ---- MacroViewController.mm logic ("Bảng gõ tắt") ----
+
+    /// All macros as `(text, content)` rows, ordered as the engine stores them.
+    pub fn macro_entries(&self) -> Vec<(String, String)> {
+        self.handler
+            .engine
+            .macros
+            .get_all_macros()
+            .into_iter()
+            .map(|(_, k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    pub fn has_macro(&self, name: &str) -> bool {
+        let ct = self.handler.engine.config.code_table as usize;
+        self.handler.engine.macros.has_macro(name, ct)
+    }
+
+    /// `onAddMacro:` — inserts a macro or updates its content when the text already exists.
+    pub fn add_or_update_macro(&mut self, name: &str, content: &str) -> Result<(), &'static str> {
+        if name.is_empty() || content.is_empty() {
+            return Err("Bạn hãy nhập từ cần gõ tắt!");
+        }
+        let ct = self.handler.engine.config.code_table as usize;
+        self.handler.engine.macros.add_macro(name, content, ct);
+        self.save_preferences();
+        Ok(())
+    }
+
+    /// `onDeleteMacro:` — returns whether a macro was actually removed.
+    pub fn delete_macro(&mut self, name: &str) -> Result<bool, &'static str> {
+        if name.is_empty() {
+            return Err("Bạn hãy chọn từ cần xoá!");
+        }
+        let ct = self.handler.engine.config.code_table as usize;
+        let removed = self.handler.engine.macros.delete_macro(name, ct);
+        if removed {
+            self.save_preferences();
+        }
+        Ok(removed)
+    }
+
+    /// `onLoadFromFile:` — `keep_existing` appends to the current macros, otherwise replaces them.
+    pub fn import_macros(&mut self, path: &Path, keep_existing: bool) -> std::io::Result<()> {
+        let ct = self.handler.engine.config.code_table as usize;
+        self.handler.engine.macros.read_from_file(path, keep_existing, ct)?;
+        self.save_preferences();
+        Ok(())
+    }
+
+    /// `onExportToFile:`.
+    pub fn export_macros(&self, path: &Path) -> std::io::Result<()> {
+        self.handler.engine.macros.save_to_file(path)
     }
 
     pub fn set_send_key_step_by_step(&mut self, enabled: bool) {
@@ -599,6 +656,7 @@ unsafe fn sync_ui_to_active_runtime(ui: &mut AppUiController) {
         let ctx = &mut *ctx_ptr;
         ctx.handler.engine.config = ui.handler.engine.config.clone();
         ctx.handler.engine.convert_tool = ui.handler.engine.convert_tool.clone();
+        ctx.handler.engine.macros = ui.handler.engine.macros.clone();
         ctx.handler.send_key_step_by_step = ui.handler.send_key_step_by_step;
         ctx.handler.fix_chromium_browser = ui.handler.fix_chromium_browser;
         ctx.handler.perform_layout_compat = ui.handler.perform_layout_compat;
@@ -1105,7 +1163,13 @@ unsafe extern "C" fn objc_on_control_panel_selected(_this: *mut c_void, _cmd: *m
 #[cfg(target_os = "macos")]
 unsafe extern "C" fn objc_on_macro_selected(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
     let ui = AppUiController::load_from_domain(OPENKEY_BUNDLE);
-    show_window(build_macro_window(&ui));
+    let existing = MACRO_WINDOW.load(Ordering::SeqCst);
+    if existing.is_null() {
+        show_window(build_macro_window(&ui));
+    } else {
+        macro_reload_table(&ui);
+        show_window(existing);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1177,6 +1241,30 @@ pub fn register_objc_delegate_class() -> *mut c_void {
         ] {
             class_addMethod(new_cls, sel(sel_name), imp, sig.as_ptr());
         }
+        for (sel_name, imp) in [
+            ("onAddMacro:", objc_on_macro_add as *const c_void),
+            ("onDeleteMacro:", objc_on_macro_delete as *const c_void),
+            ("onLoadFromFile:", objc_on_macro_load_file as *const c_void),
+            ("onExportToFile:", objc_on_macro_export_file as *const c_void),
+            ("controlTextDidChange:", objc_macro_text_changed as *const c_void),
+            ("tableViewSelectionDidChange:", objc_macro_selection_changed as *const c_void),
+        ] {
+            class_addMethod(new_cls, sel(sel_name), imp, sig.as_ptr());
+        }
+        let rows_sig = CString::new("q@:@").unwrap();
+        class_addMethod(
+            new_cls,
+            sel("numberOfRowsInTableView:"),
+            objc_macro_row_count as *const c_void,
+            rows_sig.as_ptr(),
+        );
+        let cell_sig = CString::new("@@:@@q").unwrap();
+        class_addMethod(
+            new_cls,
+            sel("tableView:objectValueForTableColumn:row:"),
+            objc_macro_cell_value as *const c_void,
+            cell_sig.as_ptr(),
+        );
         let reopen_sig = CString::new("c@:@c").unwrap();
         class_addMethod(
             new_cls,
@@ -1656,48 +1744,531 @@ pub unsafe fn cocoa_window_content_size(win: *mut c_void) -> (usize, usize) {
     (frame.size.width.round() as usize, frame.size.height.round() as usize)
 }
 
-/// Builds the native Cocoa Macro Editor (`Bảng gõ tắt`) `NSWindow` matching `MacroViewController.mm`.
+// ---------------------------------------------------------------------------
+// Bảng gõ tắt (MacroViewController.mm / Main.storyboard "Macro View Controller")
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+const MACRO_ADD_TEXT: &str = "Thêm";
+#[cfg(target_os = "macos")]
+const MACRO_EDIT_TEXT: &str = "Sửa";
+
+#[cfg(target_os = "macos")]
+struct MacroUiState {
+    domain: String,
+    entries: Vec<(String, String)>,
+}
+
+#[cfg(target_os = "macos")]
+static MACRO_STATE: Mutex<MacroUiState> = Mutex::new(MacroUiState {
+    domain: String::new(),
+    entries: Vec::new(),
+});
+#[cfg(target_os = "macos")]
+static MACRO_WINDOW: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+#[cfg(target_os = "macos")]
+static MACRO_TABLE: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+#[cfg(target_os = "macos")]
+static MACRO_NAME_FIELD: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+#[cfg(target_os = "macos")]
+static MACRO_CONTENT_FIELD: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+#[cfg(target_os = "macos")]
+static MACRO_ADD_BUTTON: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+#[cfg(target_os = "macos")]
+fn macro_state() -> MutexGuard<'static, MacroUiState> {
+    MACRO_STATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ns0(obj: *mut c_void, name: &str) -> *mut c_void {
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(obj, sel(name))
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ns1(obj: *mut c_void, name: &str, a: *mut c_void) -> *mut c_void {
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(obj, sel(name), a)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ns1_int(obj: *mut c_void, name: &str, a: isize) -> *mut c_void {
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void, isize) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(obj, sel(name), a)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ns1_bool(obj: *mut c_void, name: &str, a: bool) {
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void, i8) =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(obj, sel(name), a as i8)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ns1_f64(obj: *mut c_void, name: &str, a: f64) {
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void, f64) =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(obj, sel(name), a)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ns_ret_isize(obj: *mut c_void, name: &str) -> isize {
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void) -> isize =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(obj, sel(name))
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ns_init_frame(alloc: *mut c_void, rect: NSRect) -> *mut c_void {
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void, NSRect) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(alloc, sel("initWithFrame:"), rect)
+}
+
+/// Copies an `NSString` into a Rust `String` (empty for nil).
+#[cfg(target_os = "macos")]
+unsafe fn ns_string(ns: *mut c_void) -> String {
+    if ns.is_null() {
+        return String::new();
+    }
+    let utf8: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *const c_char =
+        std::mem::transmute(objc_msgSend as *const ());
+    let p = utf8(ns, sel("UTF8String"));
+    if p.is_null() {
+        String::new()
+    } else {
+        std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ns_field_text(field: *mut c_void) -> String {
+    if field.is_null() {
+        return String::new();
+    }
+    ns_string(ns0(field, "stringValue"))
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ns_set_field_text(field: *mut c_void, text: &str) {
+    if !field.is_null() {
+        ns1(field, "setStringValue:", nsstring(&text.replace('\0', "")));
+    }
+}
+
+/// Modal `NSAlert` (`showMessage:` in MacroViewController.mm); returns the modal response.
+#[cfg(target_os = "macos")]
+unsafe fn show_alert(title: &str, info: &str, buttons: &[&str]) -> isize {
+    let alert = ns0(ns0(cls("NSAlert"), "alloc"), "init");
+    ns1(alert, "setInformativeText:", nsstring(&info.replace('\0', "")));
+    for b in buttons {
+        ns1(alert, "addButtonWithTitle:", nsstring(b));
+    }
+    ns1(alert, "setMessageText:", nsstring(title));
+    ns1_int(alert, "setAlertStyle:", 2); // NSAlertStyleCritical
+    ns_ret_isize(alert, "runModal")
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn macro_show_message(msg: &str) {
+    show_alert("Gõ tắt", msg, &["OK"]);
+}
+
+#[cfg(target_os = "macos")]
+fn macro_domain() -> String {
+    let d = macro_state().domain.clone();
+    if d.is_empty() {
+        OPENKEY_BUNDLE.to_string()
+    } else {
+        d
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macro_load_ui() -> AppUiController {
+    AppUiController::load_from_domain(&macro_domain())
+}
+
+/// `saveAndReload`: refreshes the cached rows and the table, and clears the selection.
+#[cfg(target_os = "macos")]
+unsafe fn macro_reload_table(ui: &AppUiController) {
+    macro_state().entries = ui.macro_entries();
+    let table = MACRO_TABLE.load(Ordering::SeqCst);
+    if !table.is_null() {
+        ns0(table, "reloadData");
+        ns1(table, "deselectAll:", std::ptr::null_mut());
+    }
+}
+
+/// `controlTextDidChange:` — the button reads "Sửa" while the typed text already exists.
+#[cfg(target_os = "macos")]
+unsafe fn macro_refresh_add_button() {
+    let btn = MACRO_ADD_BUTTON.load(Ordering::SeqCst);
+    if btn.is_null() {
+        return;
+    }
+    let name = ns_field_text(MACRO_NAME_FIELD.load(Ordering::SeqCst));
+    let exists = macro_state().entries.iter().any(|(k, _)| *k == name);
+    ns1(btn, "setTitle:", nsstring(if exists { MACRO_EDIT_TEXT } else { MACRO_ADD_TEXT }));
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn macro_clear_inputs() {
+    let name_f = MACRO_NAME_FIELD.load(Ordering::SeqCst);
+    ns_set_field_text(name_f, "");
+    ns_set_field_text(MACRO_CONTENT_FIELD.load(Ordering::SeqCst), "");
+    macro_refresh_add_button();
+    let win = MACRO_WINDOW.load(Ordering::SeqCst);
+    if !win.is_null() && !name_f.is_null() {
+        ns1(win, "makeFirstResponder:", name_f);
+    }
+}
+
+/// `tableView:shouldSelectRow:` — copies the selected row into the input fields.
+#[cfg(target_os = "macos")]
+unsafe fn macro_apply_row_selection(row: usize) {
+    let entry = macro_state().entries.get(row).cloned();
+    if let Some((k, v)) = entry {
+        ns_set_field_text(MACRO_NAME_FIELD.load(Ordering::SeqCst), &k);
+        ns_set_field_text(MACRO_CONTENT_FIELD.load(Ordering::SeqCst), &v);
+        let btn = MACRO_ADD_BUTTON.load(Ordering::SeqCst);
+        if !btn.is_null() {
+            ns1(btn, "setTitle:", nsstring(MACRO_EDIT_TEXT));
+        }
+    }
+}
+
+/// `onAddMacro:` core: validates, adds/updates, persists, syncs the live engine, refreshes the UI.
+#[cfg(target_os = "macos")]
+pub unsafe fn macro_add_action() -> Result<(), String> {
+    let name = ns_field_text(MACRO_NAME_FIELD.load(Ordering::SeqCst));
+    let content = ns_field_text(MACRO_CONTENT_FIELD.load(Ordering::SeqCst));
+    let mut ui = macro_load_ui();
+    ui.add_or_update_macro(&name, &content).map_err(str::to_string)?;
+    sync_ui_to_active_runtime(&mut ui);
+    macro_reload_table(&ui);
+    macro_clear_inputs();
+    Ok(())
+}
+
+/// `onDeleteMacro:` core.
+#[cfg(target_os = "macos")]
+pub unsafe fn macro_delete_action() -> Result<(), String> {
+    let name = ns_field_text(MACRO_NAME_FIELD.load(Ordering::SeqCst));
+    let mut ui = macro_load_ui();
+    if ui.delete_macro(&name).map_err(str::to_string)? {
+        sync_ui_to_active_runtime(&mut ui);
+        macro_reload_table(&ui);
+        macro_clear_inputs();
+    }
+    Ok(())
+}
+
+/// `onLoadFromFile:` core, after the user picked a file and answered the keep-data prompt.
+#[cfg(target_os = "macos")]
+pub unsafe fn macro_import_from_path(path: &Path, keep_existing: bool) -> Result<(), String> {
+    let mut ui = macro_load_ui();
+    ui.import_macros(path, keep_existing)
+        .map_err(|e| format!("Không đọc được file gõ tắt: {}", e))?;
+    sync_ui_to_active_runtime(&mut ui);
+    macro_reload_table(&ui);
+    Ok(())
+}
+
+/// `onExportToFile:` core.
+#[cfg(target_os = "macos")]
+pub unsafe fn macro_export_to_path(path: &Path) -> Result<(), String> {
+    macro_load_ui()
+        .export_macros(path)
+        .map_err(|e| format!("Không lưu được file gõ tắt: {}", e))
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_macro_add(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    if let Err(msg) = macro_add_action() {
+        macro_show_message(&msg);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_macro_delete(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    if let Err(msg) = macro_delete_action() {
+        macro_show_message(&msg);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn macro_txt_types() -> *mut c_void {
+    ns1(cls("NSArray"), "arrayWithObject:", nsstring("txt"))
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_macro_load_file(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    let panel = ns0(cls("NSOpenPanel"), "openPanel");
+    ns1(panel, "setMessage:", nsstring("Chọn file dữ liệu gõ tắt"));
+    ns1_bool(panel, "setCanChooseFiles:", true);
+    ns1_bool(panel, "setAllowsMultipleSelection:", false);
+    ns1_bool(panel, "setCanChooseDirectories:", false);
+    ns1(panel, "setAllowedFileTypes:", macro_txt_types());
+    ns1_bool(panel, "setExtensionHidden:", false);
+    ns1(panel, "setNameFieldStringValue:", nsstring("OpenKeyMacro"));
+    ns1_int(panel, "setLevel:", 25); // NSStatusWindowLevel
+    if ns_ret_isize(panel, "runModal") != 1 {
+        return; // not NSModalResponseOK
+    }
+    let path = ns_string(ns0(ns0(panel, "URL"), "path"));
+    let keep = show_alert(
+        "Dữ liệu gõ tắt",
+        "Bạn có muốn giữ lại các dữ liệu hiện tại không?",
+        &["Có", "Không"],
+    ) == 1000; // NSAlertFirstButtonReturn
+    if let Err(msg) = macro_import_from_path(Path::new(&path), keep) {
+        macro_show_message(&msg);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_on_macro_export_file(_this: *mut c_void, _cmd: *mut c_void, _sender: *mut c_void) {
+    let panel = ns0(cls("NSSavePanel"), "savePanel");
+    ns1_bool(panel, "setCanCreateDirectories:", true);
+    ns1(panel, "setMessage:", nsstring("Chọn nơi lưu dữ liệu gõ tắt"));
+    ns1(panel, "setTitle:", nsstring("Chọn nơi lưu dữ liệu gõ tắt"));
+    ns1(panel, "setAllowedFileTypes:", macro_txt_types());
+    ns1_bool(panel, "setExtensionHidden:", false);
+    ns1(panel, "setNameFieldStringValue:", nsstring("OpenKeyMacro"));
+    if ns_ret_isize(panel, "runModal") != 1 {
+        return;
+    }
+    let path = ns_string(ns0(ns0(panel, "URL"), "path"));
+    if let Err(msg) = macro_export_to_path(Path::new(&path)) {
+        macro_show_message(&msg);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_macro_text_changed(_this: *mut c_void, _cmd: *mut c_void, _note: *mut c_void) {
+    macro_refresh_add_button();
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_macro_selection_changed(_this: *mut c_void, _cmd: *mut c_void, _note: *mut c_void) {
+    let table = MACRO_TABLE.load(Ordering::SeqCst);
+    if table.is_null() {
+        return;
+    }
+    let row = ns_ret_isize(table, "selectedRow");
+    if row >= 0 {
+        macro_apply_row_selection(row as usize);
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_macro_row_count(_this: *mut c_void, _cmd: *mut c_void, _table: *mut c_void) -> isize {
+    macro_state().entries.len() as isize
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn objc_macro_cell_value(
+    _this: *mut c_void,
+    _cmd: *mut c_void,
+    _table: *mut c_void,
+    column: *mut c_void,
+    row: isize,
+) -> *mut c_void {
+    let ident = ns_string(ns0(column, "identifier"));
+    let entry = if row >= 0 {
+        macro_state().entries.get(row as usize).cloned()
+    } else {
+        None
+    };
+    let text = match entry {
+        Some((k, v)) => {
+            if ident == "macro" {
+                k
+            } else {
+                v
+            }
+        }
+        None => String::new(),
+    };
+    nsstring(&text.replace('\0', ""))
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_editable_textfield(content_view: *mut c_void, delegate: *mut c_void, rect: NSRect) -> *mut c_void {
+    let tf = ns_init_frame(ns0(cls("NSTextField"), "alloc"), rect);
+    ns1_bool(tf, "setBezeled:", true);
+    ns1_bool(tf, "setDrawsBackground:", true);
+    ns1_bool(tf, "setEditable:", true);
+    ns1_bool(tf, "setSelectable:", true);
+    ns1(tf, "setDelegate:", delegate);
+    ns1(content_view, "addSubview:", tf);
+    tf
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn add_push_button(
+    content_view: *mut c_void,
+    target: *mut c_void,
+    title: &str,
+    action_sel: *mut c_void,
+    rect: NSRect,
+) -> *mut c_void {
+    let btn = ns_init_frame(ns0(cls("NSButton"), "alloc"), rect);
+    ns1(btn, "setTitle:", nsstring(title));
+    ns1_int(btn, "setBezelStyle:", 1); // NSBezelStyleRounded
+    ns1(btn, "setTarget:", target);
+    ns1(btn, "setAction:", action_sel);
+    ns1(content_view, "addSubview:", btn);
+    btn
+}
+
+/// Builds the native Cocoa Macro Editor (`Bảng gõ tắt`) `NSWindow` matching `MacroViewController.mm`
+/// and the storyboard layout (600x472): two inputs, Thêm/Xoá, a two-column table, file import/export
+/// and the auto-caps checkbox.
 #[cfg(target_os = "macos")]
 pub unsafe fn build_macro_window(ui: &AppUiController) -> *mut c_void {
-    let (win, cv, delegate) = create_base_window("Bảng gõ tắt - OpenKey", 460.0, 320.0);
-    let macros = ui.handler.engine.macros.get_all_macros();
-    add_label(
+    let (win, cv, delegate) = create_base_window("Bảng gõ tắt - OpenKey", 600.0, 472.0);
+    {
+        let mut st = macro_state();
+        st.domain = ui.domain.clone();
+        st.entries = ui.macro_entries();
+    }
+
+    add_label(cv, "Từ gõ tắt", NSRect::new(18.0, 435.0, 110.0, 17.0));
+    let name_field = add_editable_textfield(cv, delegate, NSRect::new(20.0, 408.0, 113.0, 25.0));
+    add_label(cv, "Nội dung đầy đủ", NSRect::new(139.0, 435.0, 150.0, 17.0));
+    let content_field = add_editable_textfield(cv, delegate, NSRect::new(141.0, 408.0, 270.0, 25.0));
+
+    let add_btn = add_bottom_icon_button(
         cv,
-        &format!("Danh sách gõ tắt ({} mục):", macros.len()),
-        NSRect::new(20.0, 275.0, 420.0, 24.0),
+        delegate,
+        MACRO_ADD_TEXT,
+        "NSAddTemplate",
+        sel("onAddMacro:"),
+        NSRect::new(419.0, 406.0, 76.0, 30.0),
     );
-    let preview = macros
-        .iter()
-        .take(8)
-        .map(|(_, k, v)| format!("• {}  →  {}", k, v))
-        .collect::<Vec<_>>()
-        .join("\n");
-    add_label(
+    add_bottom_icon_button(
         cv,
-        if preview.is_empty() {
-            "(Chưa có dữ liệu gõ tắt)"
-        } else {
-            &preview
-        },
-        NSRect::new(20.0, 100.0, 420.0, 165.0),
+        delegate,
+        "Xoá",
+        "NSRemoveTemplate",
+        sel("onDeleteMacro:"),
+        NSRect::new(504.0, 406.0, 76.0, 30.0),
+    );
+
+    let scroll = ns_init_frame(ns0(cls("NSScrollView"), "alloc"), NSRect::new(20.0, 36.0, 560.0, 351.0));
+    ns1_bool(scroll, "setHasVerticalScroller:", true);
+    ns1_bool(scroll, "setAutohidesScrollers:", true);
+    ns1_int(scroll, "setBorderType:", 2); // NSBezelBorder
+    let table = ns_init_frame(ns0(cls("NSTableView"), "alloc"), NSRect::new(0.0, 0.0, 558.0, 349.0));
+    ns1_bool(table, "setUsesAlternatingRowBackgroundColors:", true);
+    ns1_bool(table, "setAllowsMultipleSelection:", false);
+    for (ident, title, width) in [("macro", "Từ gõ tắt", 150.0), ("content", "Nội dung đầy đủ", 390.0)] {
+        let col = ns1(ns0(cls("NSTableColumn"), "alloc"), "initWithIdentifier:", nsstring(ident));
+        ns1_f64(col, "setWidth:", width);
+        ns1_bool(col, "setEditable:", false);
+        ns1(ns0(col, "headerCell"), "setStringValue:", nsstring(title));
+        ns1(table, "addTableColumn:", col);
+    }
+    ns1(table, "setDataSource:", delegate);
+    ns1(table, "setDelegate:", delegate);
+    ns1(scroll, "setDocumentView:", table);
+    ns1(cv, "addSubview:", scroll);
+
+    add_push_button(
+        cv,
+        delegate,
+        "Nạp từ file...",
+        sel("onLoadFromFile:"),
+        NSRect::new(14.0, 1.0, 115.0, 32.0),
+    );
+    add_push_button(
+        cv,
+        delegate,
+        "Xuất ra file...",
+        sel("onExportToFile:"),
+        NSRect::new(135.0, 1.0, 117.0, 32.0),
     );
     add_checkbox(
         cv,
         delegate,
-        "Tự động đổi chữ hoa theo phím tắt",
+        "Tự động viết hoa theo phím tắt",
         ui.handler.engine.config.auto_caps_macro != 0,
         8,
-        NSRect::new(20.0, 55.0, 320.0, 24.0),
+        NSRect::new(269.0, 9.0, 240.0, 18.0),
     );
-    add_checkbox(
-        cv,
-        delegate,
-        "Bật gõ tắt",
-        ui.handler.engine.config.use_macro != 0,
-        6,
-        NSRect::new(20.0, 25.0, 200.0, 24.0),
-    );
+
+    MACRO_WINDOW.store(win, Ordering::SeqCst);
+    MACRO_TABLE.store(table, Ordering::SeqCst);
+    MACRO_NAME_FIELD.store(name_field, Ordering::SeqCst);
+    MACRO_CONTENT_FIELD.store(content_field, Ordering::SeqCst);
+    MACRO_ADD_BUTTON.store(add_btn, Ordering::SeqCst);
     win
+}
+
+// ---- Introspection / driving helpers (used by the Cocoa integration test) ----
+
+#[cfg(target_os = "macos")]
+pub unsafe fn cocoa_macro_row_count() -> usize {
+    let table = MACRO_TABLE.load(Ordering::SeqCst);
+    if table.is_null() {
+        0
+    } else {
+        ns_ret_isize(table, "numberOfRows").max(0) as usize
+    }
+}
+
+/// Cell text read through the real `NSTableView` data source dispatch (column 0 = text, 1 = content).
+#[cfg(target_os = "macos")]
+pub unsafe fn cocoa_macro_cell_text(row: usize, column: usize) -> String {
+    let table = MACRO_TABLE.load(Ordering::SeqCst);
+    if table.is_null() {
+        return String::new();
+    }
+    let col = ns1_int(ns0(table, "tableColumns"), "objectAtIndex:", column as isize);
+    let ds = ns0(table, "dataSource");
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void, isize) -> *mut c_void =
+        std::mem::transmute(objc_msgSend as *const ());
+    ns_string(f(ds, sel("tableView:objectValueForTableColumn:row:"), table, col, row as isize))
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn cocoa_macro_field_values() -> (String, String) {
+    (
+        ns_field_text(MACRO_NAME_FIELD.load(Ordering::SeqCst)),
+        ns_field_text(MACRO_CONTENT_FIELD.load(Ordering::SeqCst)),
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub unsafe fn cocoa_macro_add_button_title() -> String {
+    ns_string(ns0(MACRO_ADD_BUTTON.load(Ordering::SeqCst), "title"))
+}
+
+/// Types into both inputs and fires the `controlTextDidChange:` path, like a user edit.
+#[cfg(target_os = "macos")]
+pub unsafe fn cocoa_macro_set_fields(name: &str, content: &str) {
+    ns_set_field_text(MACRO_NAME_FIELD.load(Ordering::SeqCst), name);
+    ns_set_field_text(MACRO_CONTENT_FIELD.load(Ordering::SeqCst), content);
+    macro_refresh_add_button();
+}
+
+/// Selects a table row; AppKit posts the selection notification to the delegate synchronously.
+#[cfg(target_os = "macos")]
+pub unsafe fn cocoa_macro_select_row(row: usize) {
+    let table = MACRO_TABLE.load(Ordering::SeqCst);
+    if table.is_null() {
+        return;
+    }
+    let set = ns1_int(cls("NSIndexSet"), "indexSetWithIndex:", row as isize);
+    let f: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, i8) =
+        std::mem::transmute(objc_msgSend as *const ());
+    f(table, sel("selectRowIndexes:byExtendingSelection:"), set, 0);
 }
 
 /// Builds the native Cocoa Convert Tool (`Công cụ chuyển mã`) `NSWindow` matching `ConvertToolViewController.mm`.

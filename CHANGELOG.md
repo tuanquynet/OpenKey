@@ -6,6 +6,7 @@
 - Port toàn bộ bộ gõ OpenKey cho macOS (`openkey-engine`, `openkey-macos`, `openkey-app`) sang Rust thuần túy, tương thích 100% dữ liệu và cấu hình `com.tuyenmai.openkey`.
 - Tự động kích hoạt lại `CGEventTap` khi macOS tắt event tap do timeout hoặc user input.
 - Cải thiện giao diện Bảng điều khiển 4 tab (`Bộ gõ`, `Gõ tắt`, `Hệ thống`, `Thông tin`) và tự động kết nối `CGEventTap` ngay khi được cấp quyền Accessibility.
+- Cài đặt hoàn chỉnh cửa sổ "Bảng gõ tắt" (`MacroViewController.mm`): NSTableView 2 cột (Từ gõ tắt, Nội dung đầy đủ), thêm/sửa từ thông minh theo tên phím tắt, xoá từ, chọn hàng trên bảng để điền dữ liệu, nạp/xuất file tương thích UniKey (`NSOpenPanel`/`NSSavePanel`), và tuỳ chọn tự động viết hoa theo phím tắt (`vAutoCapsMacro`).
 
 ##### Version 1.2 RC5: (26/08/2019)
 - Sửa lỗi không gõ được chữ "quởn".
